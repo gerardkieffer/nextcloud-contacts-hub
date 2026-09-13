@@ -850,21 +850,35 @@ check whether the other wants it.
   github.com/gerardkieffer/nextcloud-contacts-hub gets *real*, ordinary
   commits with real history -- no more squashing, no more force-push, one
   new commit per publish. That real history starts at the 0.1.14 snapshot
-  (`Contacts Hub 0.1.14`, 15e7212), which is the last thing force-pushed
-  under the old scheme; nothing before it was carried over, by the user's
-  explicit choice, so the public repo's history is shorter than this one's
-  and that gap is permanent, not a bug.
+  (`Contacts Hub 0.1.14`), which is the last thing force-pushed under the
+  old scheme; nothing before it was carried over, by the user's explicit
+  choice, so the public repo's history is shorter than this one's and that
+  gap is permanent, not a bug.
 * The local branch `github-main` tracks `origin/main` and is the only thing
   ever pushed. It does not share `main`'s commit objects -- to publish a
   change, replay it onto `github-main` as an ordinary commit (`git
   cherry-pick`, or a hand-written commit if a private commit bundles
   something that shouldn't cross over) and `git push origin github-main:main`
-  as a normal fast-forward. Do the personal-data sweep (emails outside the
+  as a normal fast-forward.
+* **The personal-data sweep must check commit metadata, not just file
+  contents.** The very first real-history push (the amended 0.1.14 root)
+  went out with the author *and* committer set to `gerard@mailo.com` --
+  every earlier squash-publish had used the same real address without it
+  ever mattering, because `git commit --amend`/cherry-pick both inherit the
+  original commit's author unless told otherwise, and this repo's local
+  `user.email` is the real one (`main` never leaves the machine, so it was
+  never a problem there). Caught only by reading `git show -s --format='%ae
+  %ce'` on the commit about to be pushed, not by grepping the diff -- a
+  content-only sweep passes this every time. Before every push to
+  `github-main`, check both: the diff (emails outside the
   example.com/placeholder set, `/Users/`+`kDrive` paths in `js/` and
   `package-lock.json`, `config/`/`data/`/`backup/`/`node_modules/`/`tools/`/
-  `dist/`/`.claude/` absent from the tree) before every push, same as under
-  the old scheme -- nothing about that changed, only how the push itself is
-  shaped.
+  `dist/`/`.claude/` absent from the tree) *and* every commit's author/
+  committer. Set identity explicitly when committing on `github-main`
+  (`GIT_AUTHOR_EMAIL`/`GIT_COMMITTER_EMAIL=gerard.kieffer@ikmail.com`, or
+  `git commit --amend --author`) rather than trusting the repo-wide
+  `user.email` -- `main` and `github-main` share one `.git/config` and Git
+  has no per-branch identity.
 * `data/` and `config/local.php` in the working tree are leftovers from the
   standalone app and hold real credentials and real user data. They are
   gitignored. Never commit them, and never delete `data/` while cleaning up.
