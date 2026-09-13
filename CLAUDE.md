@@ -842,10 +842,29 @@ check whether the other wants it.
 * Don't rebase or rewrite `main`; a human follows it commit by commit.
 * `python-baseline` (Python CLI) and `php-rewrite` (standalone PHP) are
   historical. Leave them alone.
-* There is no remote. The public snapshot at
-  github.com/gerardkieffer/nextcloud-contacts-hub is published by building a
-  fresh orphan commit from `main` and force-pushing it to that repo's `main`;
-  it shares no history with this repository and is not a mirror of it.
+* `main` itself still has no remote and is never pushed anywhere -- it stays
+  the private, full-detail development history.
+* **Publishing to GitHub changed on 2026-09-13.** Before that date, every
+  publish was a fresh orphan commit force-pushed over the last one, sharing
+  no history with this repo at all. From 0.1.14 on, the public repo at
+  github.com/gerardkieffer/nextcloud-contacts-hub gets *real*, ordinary
+  commits with real history -- no more squashing, no more force-push, one
+  new commit per publish. That real history starts at the 0.1.14 snapshot
+  (`Contacts Hub 0.1.14`, 15e7212), which is the last thing force-pushed
+  under the old scheme; nothing before it was carried over, by the user's
+  explicit choice, so the public repo's history is shorter than this one's
+  and that gap is permanent, not a bug.
+* The local branch `github-main` tracks `origin/main` and is the only thing
+  ever pushed. It does not share `main`'s commit objects -- to publish a
+  change, replay it onto `github-main` as an ordinary commit (`git
+  cherry-pick`, or a hand-written commit if a private commit bundles
+  something that shouldn't cross over) and `git push origin github-main:main`
+  as a normal fast-forward. Do the personal-data sweep (emails outside the
+  example.com/placeholder set, `/Users/`+`kDrive` paths in `js/` and
+  `package-lock.json`, `config/`/`data/`/`backup/`/`node_modules/`/`tools/`/
+  `dist/`/`.claude/` absent from the tree) before every push, same as under
+  the old scheme -- nothing about that changed, only how the push itself is
+  shaped.
 * `data/` and `config/local.php` in the working tree are leftovers from the
   standalone app and hold real credentials and real user data. They are
   gitignored. Never commit them, and never delete `data/` while cleaning up.
