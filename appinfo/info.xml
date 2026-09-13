@@ -1,0 +1,75 @@
+<?xml version="1.0"?>
+<!--
+    App metadata. Two things here are load-bearing and easy to get wrong:
+
+    * <namespace> must match the PHP namespace segment after OCA\ (so
+      OCA\ContactHub), and it is NOT derived from <id>. Getting it wrong
+      makes Nextcloud fail to find the Application class with a very
+      unhelpful error.
+    * <dependencies><nextcloud max-version> gates installation. Bump it
+      deliberately after testing against the new major, never speculatively.
+
+    Background jobs and settings sections are registered here too, but only
+    once the classes they name actually exist. Nextcloud resolves them on app
+    enable, and a missing class breaks the enable.
+
+    Note: XML comments may not contain a double hyphen, so no em-dash
+    shorthand in this file.
+-->
+<info xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+      xsi:noNamespaceSchemaLocation="https://apps.nextcloud.com/schema/apps/info.xsd">
+    <id>contacthub</id>
+    <name>Contacts Hub</name>
+    <summary>Sync your Nextcloud address books with iCloud, Infomaniak, Mailo and any other CardDAV service</summary>
+    <description><![CDATA[
+Turn your Nextcloud address books into a contacts hub.
+
+Contacts Hub syncs any Nextcloud address book with external CardDAV server --
+one-way, in either direction.
+Because every job runs through a Nextcloud address book, you can also
+use Nextcloud as a bridge between two external services that have no way of
+talking to each other directly.
+
+* **One-to-many.** Push one address book out to as many services as you like.
+* **Duplicate detection.** A new contact that looks like an existing one -- same
+  name plus a shared email or phone, under a different UID -- is flagged for you
+  instead of being guessed at.
+* **Deletions are your call.** Mirror them, or archive the contact into a group
+  instead of removing it.
+* **Snapshots** are taken automatically before any sync that actually writes,
+  so a bad run is always undoable.
+* **Interrupted runs resume themselves** rather than losing track of where they
+  were.
+
+Contacts stay where they belong: in Nextcloud's own address books, editable in
+the Contacts app and reachable from every CardDAV client you already use.
+    ]]></description>
+    <version>0.1.14</version>
+    <licence>agpl</licence>
+    <author mail="gerard.kieffer@ikmail.com" homepage="https://www.gerardkieffer.net">Gérard Kieffer</author>
+    <namespace>ContactHub</namespace>
+    <category>organization</category>
+    <website>https://www.gerardkieffer.net</website>
+    <bugs>https://github.com/gerardkieffer/nextcloud-contacts-hub/issues</bugs>
+    <repository type="git">https://github.com/gerardkieffer/nextcloud-contacts-hub.git</repository>
+
+    <dependencies>
+        <!-- The ported engine uses typed class constants (PHP 8.3). Nextcloud 34
+             still allows 8.2, but it is deprecated there, so 8.3 is the floor. -->
+        <php min-version="8.3"/>
+        <nextcloud min-version="34" max-version="34"/>
+    </dependencies>
+
+    <background-jobs>
+        <job>OCA\ContactHub\BackgroundJob\SyncTimedJob</job>
+    </background-jobs>
+
+    <navigations>
+        <navigation>
+            <id>contacthub</id>
+            <name>Contacts Hub</name>
+            <route>contacthub.page.index</route>
+            <order>75</order>
+        </navigation>
+    </navigations>
+</info>

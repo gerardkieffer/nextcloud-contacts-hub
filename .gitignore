@@ -1,0 +1,46 @@
+# Per-installation configuration -- holds the database credentials.
+/config/local.php
+
+# Runtime data: encryption key, photo blobs, backup snapshots, upload staging.
+/data/
+
+# Snapshots pulled off the live server: hold secret.key and password ciphertext.
+/backup/
+
+/vendor/
+/tools/
+
+# Frontend build inputs. js/ is NOT ignored: Nextcloud installs apps as plain
+# files with no build step on the server, so the built bundle ships in the repo.
+# Source maps are the exception -- 1.9 MB of regenerable text that would
+# dominate both the repository and the app-store tarball.
+/node_modules/
+/.npm-cache/
+/js/*.map
+
+# Per-machine Claude Code state: permission grants, and launch.json, which
+# describes how to start a preview on *this* machine. The project's own dev
+# setup is dev/docker-compose.yml and the dev/ wrappers, which are shared;
+# this directory is not, and a stale copy of it is worse than none (the one
+# that used to ship here still started `php -S -t public`, a directory the
+# Nextcloud migration deleted).
+/.claude/
+/.phpunit.cache/
+composer.lock
+*.log
+.env
+.DS_Store
+
+# Leftover from the Python baseline on main; harmless if present locally.
+__pycache__/
+*.pyc
+.venv/
+venv/
+config.yaml
+*.db
+.pytest_cache/
+*.egg-info/
+
+# Built app packages, made by ./dev/package.
+/dist/
+/contacthub*.tar.gz

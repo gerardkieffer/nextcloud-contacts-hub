@@ -1,0 +1,16 @@
+#!/bin/sh
+# Run the integration suite inside the dev Nextcloud container.
+#
+#   ./dev/phpunit-integration
+#   ./dev/phpunit-integration --filter testPushesAContactWithAPhoto
+#
+# Runs as www-data: Nextcloud refuses to boot as root, and running as anyone
+# else leaves files in the data directory that the web server cannot read.
+set -eu
+
+DOCKER="${DOCKER:-/Applications/Docker.app/Contents/Resources/bin/docker}"
+COMPOSE_FILE="$(cd "$(dirname "$0")" && pwd)/docker-compose.yml"
+APP=/var/www/html/custom_apps/contacthub
+
+exec "$DOCKER" compose -f "$COMPOSE_FILE" exec -T --user www-data app \
+	php "$APP/tools/phpunit.phar" -c "$APP/phpunit.integration.xml" "$@"

@@ -1,0 +1,20 @@
+#!/bin/sh
+# Run PHP against the repository without installing PHP on the host.
+#
+# This project is developed from more than one Mac (Intel and Apple Silicon),
+# so a container pins the exact PHP version the app declares in
+# appinfo/info.xml on every machine, rather than trusting whatever Homebrew
+# happens to have installed locally. On Intel Homebrew it also sidesteps a
+# from-source build (no bottles there -- an hour or more).
+#
+#   ./dev/php tools/phpunit.phar -c phpunit.unit.xml
+#   ./dev/php -v
+set -eu
+
+REPO="$(cd "$(dirname "$0")/.." && pwd)"
+DOCKER="${DOCKER:-/Applications/Docker.app/Contents/Resources/bin/docker}"
+
+exec "$DOCKER" run --rm -i \
+	-v "$REPO:/app" \
+	-w /app \
+	php:8.3-cli php "$@"

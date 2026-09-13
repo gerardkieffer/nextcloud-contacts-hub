@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    The integration suite: real database, real CardDavBackend, real Runner.
+    There is no network. Endpoints are faked at the HTTP transport, so every
+    layer above the socket is genuine.
+
+    Must run inside the dev container:
+
+        ./dev/phpunit-integration
+
+    Unlike the unit suite, these tests do NOT skip themselves when the
+    environment is missing. A silent skip is how a green run comes to mean
+    nothing; the bootstrap fails loudly instead.
+
+    (No double hyphens in this file: XML forbids them inside a comment.)
+-->
+<phpunit xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:noNamespaceSchemaLocation="https://schema.phpunit.de/11.0/phpunit.xsd"
+         bootstrap="tests/Integration/bootstrap.php"
+         colors="true"
+         failOnWarning="true"
+         failOnNotice="true"
+         cacheDirectory=".phpunit.cache">
+    <testsuites>
+        <testsuite name="integration">
+            <directory>tests/Integration</directory>
+        </testsuite>
+    </testsuites>
+    <source>
+        <include>
+            <directory>lib</directory>
+        </include>
+    </source>
+</phpunit>

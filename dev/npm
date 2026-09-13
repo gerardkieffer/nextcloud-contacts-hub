@@ -1,0 +1,20 @@
+#!/bin/sh
+# Run npm/vite against the repository without installing Node on the host.
+# See ./dev/php for why this is containerised.
+#
+#   ./dev/npm install
+#   ./dev/npm run build
+#
+# node_modules/ lands in the repository via the bind mount and is gitignored.
+# It holds Linux-built binaries, so use this wrapper for every npm invocation
+# rather than mixing it with a host Node if one is ever installed.
+set -eu
+
+REPO="$(cd "$(dirname "$0")/.." && pwd)"
+DOCKER="${DOCKER:-/Applications/Docker.app/Contents/Resources/bin/docker}"
+
+exec "$DOCKER" run --rm -i \
+	-v "$REPO:/app" \
+	-w /app \
+	-e npm_config_cache=/app/.npm-cache \
+	node:22 npm "$@"

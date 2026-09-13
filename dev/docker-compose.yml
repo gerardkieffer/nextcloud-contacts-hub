@@ -1,0 +1,59 @@
+# Throwaway Nextcloud 34 for developing and testing this app.
+#
+# The repository root is bind-mounted straight into custom_apps/contacthub,
+# so an edit on the host is live in the container with no sync step. The
+# Nextcloud installation itself lives in a named volume, which is what you
+# throw away when you want a clean slate:
+#
+#   cd dev && docker compose down -v && docker compose up -d
+#
+# Admin credentials are deliberately trivial (admin/admin) -- this instance
+# is reachable only on localhost:8080 and holds nothing real. Never point it
+# at production data.
+
+services:
+  db:
+    image: mariadb:11.4
+    # READ-COMMITTED + row-based binlog is what Nextcloud asks for; without
+    # it the installer emits warnings and some queries deadlock under load.
+    command: >
+      --transaction-isolation=READ-COMMITTED
+      --log-bin=binlog
+      --binlog-format=ROW
+    environment:
+      MARIADB_ROOT_PASSWORD: root
+      MARIADB_DATABASE: nextcloud
+      MARIADB_USER: nextcloud
+      MARIADB_PASSWORD: nextcloud
+    volumes:
+      - db:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  app:
+    image: nextcloud:34-apache
+    ports:
+      - "8080:80"
+    environment:
+      MYSQL_HOST: db
+      MYSQL_DATABASE: nextcloud
+      MYSQL_USER: nextcloud
+      MYSQL_PASSWORD: nextcloud
+      NEXTCLOUD_ADMIN_USER: admin
+      NEXTCLOUD_ADMIN_PASSWORD: admin
+      NEXTCLOUD_TRUSTED_DOMAINS: localhost
+    volumes:
+      - nc:/var/www/html
+      # The app under development. The bind mount shadows this path inside
+      # the nc volume, which is exactly what we want.
+      - ../:/var/www/html/custom_apps/contacthub
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  db:
+  nc:

@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    The unit suite: everything that needs neither a database nor a Nextcloud
+    runtime. It is the default config so a bare `phpunit` run stays fast and
+    works anywhere PHP does:
+
+        ./dev/php tools/phpunit.phar
+
+    tests/Integration/ is deliberately excluded. Those tests need a live
+    Nextcloud and a real database, and run inside the dev container against
+    their own config (added in phase 3).
+-->
+<phpunit xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:noNamespaceSchemaLocation="https://schema.phpunit.de/11.0/phpunit.xsd"
+         bootstrap="tests/bootstrap.php"
+         colors="true"
+         failOnWarning="true"
+         failOnNotice="true"
+         cacheDirectory=".phpunit.cache">
+    <testsuites>
+        <testsuite name="unit">
+            <directory>tests</directory>
+            <exclude>tests/Integration</exclude>
+        </testsuite>
+    </testsuites>
+    <source>
+        <include>
+            <directory>lib</directory>
+        </include>
+    </source>
+</phpunit>

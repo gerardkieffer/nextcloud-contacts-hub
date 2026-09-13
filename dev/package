@@ -1,0 +1,85 @@
+#!/bin/sh
+# Build an installable app tarball, named for the version in info.xml.
+#
+#   ./dev/package              -> dist/contacthub-0.1.0.tar.gz
+#   ./dev/package /tmp         -> /tmp/contacthub-0.1.0.tar.gz
+#
+# Unpacks to a directory called exactly "contacthub", which is what
+# Nextcloud requires: the folder name has to match <id> in info.xml or the
+# app is never found. See docs/install.md.
+#
+# Needs nothing installed -- no PHP, no Node, no Docker. If js/ is missing
+# or out of date, that is reported and the build stops, because a package
+# built from a stale bundle installs cleanly and then serves an old UI,
+# which is a slow and confusing thing to debug.
+set -eu
+
+REPO="$(cd "$(dirname "$0")/.." && pwd)"
+OUT_DIR="${1:-$REPO/dist}"
+INFO="$REPO/appinfo/info.xml"
+
+# Only what the server actually reads. Notably absent: src/ (build input),
+# tests/, dev/, node_modules/, and js/*.map -- the source map alone is 6.4 MB,
+# more than twenty times the rest of the package put together.
+RUNTIME_DIRS='appinfo lib templates'
+BUNDLE='js/contacthub-main.mjs'
+
+die() { echo "package: $*" >&2; exit 1; }
+
+[ -f "$INFO" ] || die "no appinfo/info.xml -- run this from the app repository"
+
+# The first <version> tag. Deliberately not the first <id>: info.xml also
+# carries <id> elements inside <navigations>, and the same laziness applied
+# to the version would pick up a dependency's version string one day.
+VERSION="$(sed -n 's:.*<version>\(.*\)</version>.*:\1:p' "$INFO" | head -n 1)"
+[ -n "$VERSION" ] || die "could not read <version> from appinfo/info.xml"
+
+[ -f "$REPO/$BUNDLE" ] || die "$BUNDLE is missing -- run ./dev/npm run build first"
+
+# A bundle older than any of its sources means someone edited src/ and did not
+# rebuild. Comparing against every source file rather than a single marker,
+# because the one that got edited is exactly the one that would be missed.
+STALE="$(find "$REPO/src" -type f -newer "$REPO/$BUNDLE" 2>/dev/null | head -n 5)"
+if [ -n "$STALE" ]; then
+	echo "package: $BUNDLE is older than these sources:" >&2
+	echo "$STALE" | sed 's:^:  :' >&2
+	die "run ./dev/npm run build first"
+fi
+
+STAGE="$(mktemp -d)"
+trap 'rm -rf "$STAGE"' EXIT INT TERM
+
+APP="$STAGE/contacthub"
+mkdir -p "$APP/js"
+
+for dir in $RUNTIME_DIRS; do
+	[ -d "$REPO/$dir" ] || die "missing $dir/"
+	cp -R "$REPO/$dir" "$APP/"
+done
+cp "$REPO/$BUNDLE" "$APP/js/"
+
+# The licence sidecar belongs next to the bundle it describes; the README is
+# what someone finds when they go looking inside the installed app. Written as
+# `if` rather than `[ ... ] && cp`, which under `set -e` exits the whole script
+# the moment the file is absent.
+if [ -f "$REPO/js/contacthub-main.mjs.license" ]; then
+	cp "$REPO/js/contacthub-main.mjs.license" "$APP/js/"
+fi
+if [ -f "$REPO/README.md" ]; then
+	cp "$REPO/README.md" "$APP/"
+fi
+
+# macOS resource forks and Finder droppings travel in tarballs otherwise, and
+# arrive on the server as ._-prefixed files scattered through the app.
+find "$APP" -name '.DS_Store' -delete
+find "$APP" -name '._*' -delete
+
+TARBALL="$OUT_DIR/contacthub-$VERSION.tar.gz"
+mkdir -p "$OUT_DIR"
+COPYFILE_DISABLE=1 tar --no-xattrs -C "$STAGE" -czf "$TARBALL" contacthub
+
+echo "$TARBALL"
+echo "  version $VERSION, $(find "$APP" -type f | wc -l | tr -d ' ') files, $(du -h "$TARBALL" | cut -f1)"
+echo
+echo "  Install:  tar xzf $(basename "$TARBALL") -C <nextcloud>/custom_apps"
+echo "            php occ app:enable contacthub"

@@ -1,0 +1,20 @@
+#!/bin/sh
+# Syntax-check every PHP file in one container pass.
+#
+# Doing this as `find | xargs ./dev/php -l` would start one container per
+# file, which takes minutes. The loop runs inside a single container instead.
+set -eu
+
+REPO="$(cd "$(dirname "$0")/.." && pwd)"
+DOCKER="${DOCKER:-/Applications/Docker.app/Contents/Resources/bin/docker}"
+
+exec "$DOCKER" run --rm -i \
+	-v "$REPO:/app" \
+	-w /app \
+	php:8.3-cli \
+	sh -c 'fail=0
+		for f in $(find lib tests -name "*.php"); do
+			out=$(php -l "$f" 2>&1) || { echo "$out"; fail=1; }
+		done
+		if [ "$fail" -eq 0 ]; then echo "lint: all files OK"; fi
+		exit "$fail"'

@@ -1,0 +1,40 @@
+{
+    "name": "gerardkieffer/contacthub",
+    "description": "Nextcloud app: sync Nextcloud address books with iCloud, Infomaniak, Mailo and any other CardDAV service.",
+    "type": "project",
+    "license": "AGPL-3.0-or-later",
+    "homepage": "https://www.gerardkieffer.net",
+    "authors": [
+        {
+            "name": "Gérard Kieffer",
+            "homepage": "https://www.gerardkieffer.net"
+        }
+    ],
+    "support": {
+        "issues": "https://github.com/gerardkieffer/nextcloud-contacts-hub/issues",
+        "source": "https://github.com/gerardkieffer/nextcloud-contacts-hub"
+    },
+    "require": {
+        "php": ">=8.3",
+        "ext-dom": "*",
+        "ext-json": "*",
+        "ext-zlib": "*"
+    },
+    "require-dev": {
+        "phpunit/phpunit": "^11.0"
+    },
+    "autoload": {
+        "psr-4": {
+            "OCA\\ContactHub\\": "lib/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "OCA\\ContactHub\\Tests\\": "tests/"
+        }
+    },
+    "config": {
+        "optimize-autoloader": true,
+        "sort-packages": true
+    }
+}

@@ -1,0 +1,16 @@
+#!/bin/sh
+# Run Nextcloud's occ inside the dev container.
+#
+#   ./dev/occ app:enable contacthub
+#   ./dev/occ app:list
+#   ./dev/occ config:system:set debug --value=true --type=boolean
+#
+# occ must run as the web server user or it refuses to start and, worse, can
+# leave root-owned files in the data directory.
+set -eu
+
+DOCKER="${DOCKER:-/Applications/Docker.app/Contents/Resources/bin/docker}"
+
+exec "$DOCKER" compose \
+	-f "$(cd "$(dirname "$0")" && pwd)/docker-compose.yml" \
+	exec -T --user www-data app php occ "$@"

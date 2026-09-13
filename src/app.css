@@ -1,0 +1,70 @@
+/*
+ * The handful of shared rules the views need. Everything else is scoped to
+ * its component, and every colour comes from a Nextcloud custom property so
+ * the app follows the instance theme (including dark mode) without knowing
+ * anything about it.
+ */
+
+.ch-view {
+	max-width: 1000px;
+	padding: 24px;
+	margin-inline: auto;
+}
+
+.ch-view__header {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 16px;
+	flex-wrap: wrap;
+	margin-block-end: 16px;
+}
+
+.ch-view__header h2 {
+	margin: 0;
+}
+
+.ch-form {
+	max-width: 640px;
+}
+
+.ch-muted {
+	color: var(--color-text-maxcontrast);
+}
+
+.ch-table {
+	width: 100%;
+	border-collapse: collapse;
+}
+
+.ch-table th,
+.ch-table td {
+	padding: 10px 8px;
+	text-align: start;
+	vertical-align: top;
+	border-block-end: 1px solid var(--color-border);
+}
+
+.ch-table thead th {
+	color: var(--color-text-maxcontrast);
+	font-weight: normal;
+}
+
+.ch-actions {
+	display: flex;
+	gap: 4px;
+	flex-wrap: wrap;
+}
+
+/* Tables are the one thing allowed to scroll sideways on a narrow screen;
+   the page itself must never. */
+@media (max-width: 700px) {
+	.ch-view {
+		padding: 12px;
+	}
+
+	.ch-table {
+		display: block;
+		overflow-x: auto;
+	}
+}
