@@ -92,9 +92,14 @@ final class JobValidator
     }
 
     /**
-     * Several address books writing into one endpoint collection: with a
-     * mirror deletion policy each job treats the others' contacts as
-     * "deleted from my side" and removes them.
+     * Several address books writing into one endpoint collection.
+     *
+     * This used to warn that with mirror deletions each job would delete
+     * the other's contacts. That stopped being true when two-way sync was
+     * removed: a job only ever deletes contacts it synced itself, so the
+     * warning blamed a risk that did not exist and missed the one that
+     * does -- a contact present in both books under the same UID is one
+     * card on the endpoint, rewritten by whichever job ran last.
      *
      * @return list<array{severity: string, message: string}>
      */
@@ -116,10 +121,9 @@ final class JobValidator
             $out[] = [
                 'severity' => self::SEVERITY_WARNING,
                 'message' => "'{$other->name}' writes a different address book into the same endpoint "
-                    . "collection. Both address books' contacts end up mixed together there"
-                    . ($job->deletionPolicy === 'mirror'
-                        ? ", and with the mirror deletion policy each job will delete the other's contacts."
-                        : '.'),
+                    . "collection. Both address books' contacts end up mixed together there, and a contact "
+                    . 'that is in both address books is a single entry on the endpoint, overwritten by '
+                    . 'whichever job ran last.',
             ];
         }
         return $out;

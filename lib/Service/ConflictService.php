@@ -55,7 +55,8 @@ class ConflictService
         );
     }
 
-    public function resolve(int $conflictId, string $userId, string $resolution): void
+    /** @return array{outcome: string, warnings: list<string>} see ConflictApplier::apply() */
+    public function resolve(int $conflictId, string $userId, string $resolution): array
     {
         $allowed = [ConflictApplier::HUB, ConflictApplier::ENDPOINT, ConflictApplier::ARCHIVE, ConflictApplier::CANCEL];
         if (!in_array($resolution, $allowed, true)) {
@@ -71,7 +72,10 @@ class ConflictService
         // user_id of their own.
         $job = $this->jobs->require((int) $row['job_id'], $userId);
 
-        $this->applier->apply($job, $row, $resolution);
+        $result = $this->applier->apply($job, $row, $resolution);
+        $this->jobs->resumeIfNoConflicts($job->id, $userId);
+
+        return $result;
     }
 
     /**
@@ -87,7 +91,10 @@ class ConflictService
      * or contributes one line to the error list, the same way a sync
      * run's per-item errors don't fail the whole run.
      *
-     * @return array{resolved: int, errors: list<string>}
+     * "resolved" counts every conflict closed, "obsolete" the part of those
+     * that no longer stood and were closed without changing anything.
+     *
+     * @return array{resolved: int, obsolete: int, errors: list<string>, warnings: list<string>}
      */
     public function resolveBatch(string $userId, string $choice): array
     {
@@ -96,7 +103,9 @@ class ConflictService
         }
 
         $resolved = 0;
+        $obsolete = 0;
         $errors = [];
+        $warnings = [];
 
         foreach ($this->jobs->listFor($userId) as $job) {
             $jobObj = null;
@@ -123,15 +132,22 @@ class ConflictService
 
                 try {
                     $jobObj ??= $this->jobs->require((int) $job['id'], $userId);
-                    $this->applier->apply($jobObj, $row, $resolution);
+                    $applied = $this->applier->apply($jobObj, $row, $resolution);
                     $resolved++;
+                    if ($applied['outcome'] === ConflictApplier::OBSOLETE) {
+                        $obsolete++;
+                    }
+                    array_push($warnings, ...$applied['warnings']);
                 } catch (\Throwable $e) {
                     $errors[] = ($job['name'] ?? '?') . " / {$row['uid']}: {$e->getMessage()}";
                 }
             }
+            if ($jobObj !== null) {
+                $this->jobs->resumeIfNoConflicts($jobObj->id, $userId);
+            }
         }
 
-        return ['resolved' => $resolved, 'errors' => $errors];
+        return ['resolved' => $resolved, 'obsolete' => $obsolete, 'errors' => $errors, 'warnings' => $warnings];
     }
 
     /** @param array<string, mixed> $duplicate */
@@ -241,7 +257,8 @@ class ConflictService
         }
 
         try {
-            $parsed = Model::parse($vcardText);
+            // Any fallback will do: a summary only needs the card readable.
+            $parsed = Model::parse($vcardText, 'unknown');
         } catch (\Throwable) {
             return ['unparseable' => true, 'raw' => $vcardText];
         }

@@ -30,7 +30,7 @@ final class ConflictPresentationTest extends IntegrationTestCase
     private function service(): ConflictService
     {
         $addressBooks = new AddressBookService($this->backend);
-        $jobService = new JobService($this->jobs, $this->state, $addressBooks, $this->endpoints);
+        $jobService = new JobService($this->jobs, $this->state, $addressBooks, $this->endpoints, $this->stateReset());
 
         return new ConflictService($this->state, $this->conflictApplier(), $jobService);
     }

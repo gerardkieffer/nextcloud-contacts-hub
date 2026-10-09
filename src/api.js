@@ -72,6 +72,9 @@ export const api = {
 	inspectSettings: (source) => call('post', 'settings/inspect', source),
 	importSettings: (source, passwords) => call('post', 'settings/import', { ...source, passwords }),
 
+	notifications: () => call('get', 'notifications'),
+	updateNotifications: (mode, customEmail) => call('put', 'notifications', { mode, customEmail }),
+
 	jobs: () => call('get', 'jobs'),
 	job: (id) => call('get', `jobs/${id}`),
 	createJob: (data) => call('post', 'jobs', data),

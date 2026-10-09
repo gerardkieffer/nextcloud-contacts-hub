@@ -158,7 +158,10 @@ class BackupService
      * single most useful property this feature has, and the one people only
      * discover they needed afterwards.
      *
-     * @return array{created: int, updated: int, deleted: int}
+     * `touched` lists the card URIs the restore wrote or deleted, so a caller
+     * can tell the jobs syncing this book what changed under them.
+     *
+     * @return array{created: int, updated: int, deleted: int, touched: list<string>}
      */
     public function restore(int $backupId, string $userId, bool $mirror = true): array
     {
@@ -181,12 +184,13 @@ class BackupService
             $live[(string) $card['uri']] = (string) $card['carddata'];
         }
 
-        $stats = ['created' => 0, 'updated' => 0, 'deleted' => 0];
+        $stats = ['created' => 0, 'updated' => 0, 'deleted' => 0, 'touched' => []];
 
         foreach ($wanted as $uri => $carddata) {
             if (!array_key_exists($uri, $live)) {
                 $this->backend->createCard($addressBookId, $uri, $carddata);
                 $stats['created']++;
+                $stats['touched'][] = $uri;
                 continue;
             }
             // Compare through textHash: a snapshot taken before a readBlob()
@@ -194,6 +198,7 @@ class BackupService
             if (Model::textHash($live[$uri]) !== Model::textHash($carddata)) {
                 $this->backend->updateCard($addressBookId, $uri, $carddata);
                 $stats['updated']++;
+                $stats['touched'][] = $uri;
             }
         }
 
@@ -202,11 +207,20 @@ class BackupService
                 if (!array_key_exists($uri, $wanted)) {
                     $this->backend->deleteCard($addressBookId, $uri);
                     $stats['deleted']++;
+                    $stats['touched'][] = (string) $uri;
                 }
             }
         }
 
         return $stats;
+    }
+
+    /** The address book a snapshot of $userId's was taken from, or null if there is no such snapshot. */
+    public function addressBookOf(int $backupId, string $userId): ?int
+    {
+        $meta = $this->backups->find($backupId, $userId);
+
+        return $meta === null ? null : (int) $meta['address_book_id'];
     }
 
     /** @return list<array<string, mixed>> */

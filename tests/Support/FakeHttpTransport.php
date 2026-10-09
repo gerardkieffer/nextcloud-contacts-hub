@@ -57,6 +57,20 @@ final class FakeHttpTransport implements HttpTransport
      */
     public array $dropFromAddressData = [];
 
+    /**
+     * The whole-collection addressbook-query leaves UID out of contact cards
+     * while GET and multiget keep it -- what Mailo does. Groups are left alone,
+     * as they are there.
+     */
+    public bool $reportOmitsUid = false;
+
+    /**
+     * List hrefs percent-decoded, as some servers spell them, instead of
+     * exactly as they were written. Same resources, different strings --
+     * what used to make a contact look absent on every run.
+     */
+    public bool $listDecodedHrefs = false;
+
     public function __construct(string $base)
     {
         $this->base = rtrim($base, '/') . '/';
@@ -185,7 +199,7 @@ final class FakeHttpTransport implements HttpTransport
             }
             $res = $this->resources[$href];
             $escaped = htmlspecialchars($res['body'], ENT_XML1);
-            $responses .= '<D:response><D:href>' . $href . '</D:href><D:propstat><D:prop>'
+            $responses .= '<D:response><D:href>' . $this->spell($href) . '</D:href><D:propstat><D:prop>'
                 . '<D:getetag>' . $res['etag'] . '</D:getetag>'
                 . '<card:address-data>' . $escaped . '</card:address-data>'
                 . '</D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat></D:response>';
@@ -213,7 +227,7 @@ final class FakeHttpTransport implements HttpTransport
         $this->etagListCallCount++;
         $responses = '';
         foreach ($this->resources as $href => $res) {
-            $responses .= '<D:response><D:href>' . $href . '</D:href><D:propstat><D:prop><D:getetag>'
+            $responses .= '<D:response><D:href>' . $this->spell($href) . '</D:href><D:propstat><D:prop><D:getetag>'
                 . $res['etag'] . '</D:getetag></D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat></D:response>';
         }
         return new HttpResponse(200, [], '<?xml version="1.0"?><D:multistatus xmlns:D="DAV:">' . $responses . '</D:multistatus>');
@@ -227,13 +241,34 @@ final class FakeHttpTransport implements HttpTransport
             if (in_array($href, $this->dropFromAddressData, true)) {
                 continue;
             }
-            $escaped = htmlspecialchars($res['body'], ENT_XML1);
-            $responses .= '<D:response><D:href>' . $href . '</D:href><D:propstat><D:prop><card:address-data>'
+            $body = (string) $res['body'];
+            if ($this->reportOmitsUid && !preg_match('/KIND:group/i', $body)) {
+                $body = preg_replace('/^UID[;:][^\r\n]*\r?\n/mi', '', $body) ?? $body;
+            }
+            $escaped = htmlspecialchars($body, ENT_XML1);
+            $responses .= '<D:response><D:href>' . $this->spell($href) . '</D:href><D:propstat><D:prop><card:address-data>'
                 . $escaped . '</card:address-data></D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat></D:response>';
         }
         $xml = '<?xml version="1.0"?><D:multistatus xmlns:D="DAV:" xmlns:card="urn:ietf:params:xml:ns:carddav">'
             . $responses . '</D:multistatus>';
         return new HttpResponse(200, [], $xml);
+    }
+
+    private function spell(string $href): string
+    {
+        if ($this->listDecodedHrefs) {
+            // Only what decodes without changing the meaning: a server can
+            // spell %20 as a space, but %2F as "/" would be another path.
+            $href = preg_replace_callback(
+                '/%([0-9A-Fa-f]{2})/',
+                static fn(array $m): string => in_array(strtoupper($m[1]), ['2F', '23', '3F', '25'], true)
+                    ? $m[0]
+                    : chr((int) hexdec($m[1])),
+                $href,
+            ) ?? $href;
+        }
+
+        return htmlspecialchars($href, ENT_XML1);
     }
 
     private function handlePut(string $url, string $body, ?string $ifMatch, ?string $ifNoneMatch = null): HttpResponse

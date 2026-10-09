@@ -162,15 +162,19 @@ final class PlannerTest extends TestCase
         self::assertSame(['new-1'], $plan->contactsCreateAToB);
     }
 
-    public function testContactWithoutFirstOrLastNameNeverMatches(): void
+    public function testContactWithoutLastNameStillMatchesOnSharedEmail(): void
     {
+        // No structured last name doesn't exclude the contact from matching
+        // any more -- an exact shared email is sufficient on its own.
         $bookA = new AddressBook(contacts: ['new-1' => $this->person('new-1', 'Madonna', '', ['m@x.com'])]);
         $bookB = new AddressBook(contacts: ['old-2' => $this->person('old-2', 'Madonna', '', ['m@x.com'])]);
 
         $plan = $this->planner->plan(new PlanInput($bookA, $bookB, [], [], []));
 
-        self::assertSame(['new-1'], $plan->contactsCreateAToB);
-        self::assertSame([], $plan->contactDuplicates);
+        self::assertSame([], $plan->contactsCreateAToB);
+        self::assertCount(1, $plan->contactDuplicates);
+        self::assertSame('new-1', $plan->contactDuplicates[0]->uid);
+        self::assertSame('old-2', $plan->contactDuplicates[0]->destUid);
     }
 
     public function testGroupNamesForContactMergesBothSidesAndDedups(): void
@@ -193,5 +197,117 @@ final class PlannerTest extends TestCase
         $plan = $this->planner->plan(new PlanInput($bookA, $bookB, [], $groupStates, []));
 
         self::assertTrue($plan->isEmpty());
+    }
+
+    public function testGroupNameCollisionIsRecordedButGroupIsStillCreated(): void
+    {
+        $groupA = new Group('g1', 'Family', ['u1'], '');
+        $groupB = new Group('g2', 'family', ['u1'], '');
+        $bookA = new AddressBook(groups: ['g1' => $groupA]);
+        $bookB = new AddressBook(groups: ['g2' => $groupB]);
+
+        $plan = $this->planner->plan(new PlanInput($bookA, $bookB, [], [], []));
+
+        self::assertSame(['g1'], $plan->groupsCreateAToB);
+        self::assertSame([['g1', 'g2', 'Family']], $plan->groupNameCollisions);
+    }
+
+    public function testTrackedDestinationGroupIsNeverACollisionCandidate(): void
+    {
+        $groupA = new Group('g1', 'Family', ['u1'], '');
+        $groupB = new Group('g2', 'Family', ['u1'], '');
+        $bookA = new AddressBook(groups: ['g1' => $groupA]);
+        $bookB = new AddressBook(groups: ['g2' => $groupB]);
+        $groupStates = ['g2' => ['a_href' => null, 'b_href' => 'b/g2.vcf', 'a_hash' => null, 'b_hash' => null]];
+
+        $plan = $this->planner->plan(new PlanInput($bookA, $bookB, [], $groupStates, []));
+
+        self::assertSame([], $plan->groupNameCollisions);
+    }
+
+    /** @param string[] $emails @param string[] $phones */
+    private function uidless(string $uid, string $first, string $last, array $emails = [], array $phones = []): Contact
+    {
+        return new Contact($uid, "{$first} {$last}", "BEGIN:VCARD\r\nFN:{$first} {$last}\r\nEND:VCARD\r\n", false, null, $first, $last, $emails, $phones, [], true);
+    }
+
+    public function testAContactMatchingOneUidlessCardOnBIsAdoptedNotDuplicated(): void
+    {
+        $bookA = new AddressBook(contacts: ['n1' => $this->person('n1', 'Alice', 'Martin', ['alice@example.com'])]);
+        $bookB = new AddressBook(contacts: ['b1' => $this->uidless('b1', 'Alice', 'Martin', ['alice@example.com'])]);
+
+        $plan = $this->planner->plan(new PlanInput($bookA, $bookB, [], [], []));
+
+        self::assertSame(['n1'], $plan->contactsCreateAToB, 'planned as a create, which Runner turns into an in-place update');
+        self::assertSame(['n1' => 'b1'], $plan->contactsAdoptAToB);
+        self::assertSame([], $plan->contactDuplicates, 'no conflict to resolve by hand');
+    }
+
+    public function testAContactMatchingTwoUidlessCardsIsAConflictNotAGuess(): void
+    {
+        $bookA = new AddressBook(contacts: ['n1' => $this->person('n1', 'Alice', 'Martin', ['alice@example.com'])]);
+        $bookB = new AddressBook(contacts: [
+            'b1' => $this->uidless('b1', 'Alice', 'Martin', ['alice@example.com']),
+            'b2' => $this->uidless('b2', 'Alice', 'Martin', ['alice@example.com']),
+        ]);
+
+        $plan = $this->planner->plan(new PlanInput($bookA, $bookB, [], [], []));
+
+        self::assertSame([], $plan->contactsAdoptAToB);
+        self::assertCount(1, $plan->contactDuplicates);
+        self::assertSame([], $plan->contactsCreateAToB);
+    }
+
+    public function testTwoContactsClaimingOneUidlessCardAreBothConflicts(): void
+    {
+        // Namesakes sharing a household phone: which one the card is cannot be
+        // told, and the card is about to be overwritten.
+        $bookA = new AddressBook(contacts: [
+            'n1' => $this->person('n1', 'Alice', 'Martin', [], ['111']),
+            'n2' => $this->person('n2', 'Alice', 'Martin', [], ['111']),
+        ]);
+        $bookB = new AddressBook(contacts: ['b1' => $this->uidless('b1', 'Alice', 'Martin', [], ['111'])]);
+
+        $plan = $this->planner->plan(new PlanInput($bookA, $bookB, [], [], []));
+
+        self::assertSame([], $plan->contactsAdoptAToB);
+        self::assertCount(2, $plan->contactDuplicates);
+    }
+
+    public function testAnEmailAloneMatchOnAUidlessCardStaysAConflict(): void
+    {
+        $bookA = new AddressBook(contacts: ['n1' => $this->person('n1', 'Alice', 'Martin', ['shared@example.com'])]);
+        $bookB = new AddressBook(contacts: ['b1' => $this->uidless('b1', 'Someone', 'Else', ['shared@example.com'])]);
+
+        $plan = $this->planner->plan(new PlanInput($bookA, $bookB, [], [], []));
+
+        self::assertSame([], $plan->contactsAdoptAToB);
+        self::assertCount(1, $plan->contactDuplicates);
+    }
+
+    public function testAnAdoptedContactIsNotAdoptedAgainOnceTracked(): void
+    {
+        $bookA = new AddressBook(contacts: ['n1' => $this->person('n1', 'Alice', 'Martin', ['alice@example.com'])]);
+        $bookB = new AddressBook(contacts: ['n1' => $this->person('n1', 'Alice', 'Martin', ['alice@example.com'])]);
+        $hash = Model::contactContentHash($bookA->contacts['n1']);
+        $state = ['n1' => ['a_href' => 'a.vcf', 'a_hash' => $hash, 'b_href' => '/b.vcf', 'b_hash' => $hash]];
+
+        $plan = $this->planner->plan(new PlanInput($bookA, $bookB, $state, [], ['/b.vcf' => 'e1']));
+
+        self::assertTrue($plan->isEmpty());
+    }
+
+    public function testAContactWhoseUidIsAlreadyOnBIsTheSameContactNotADuplicateOfItsNamesake(): void
+    {
+        $bookA = new AddressBook(contacts: ['n1' => $this->person('n1', 'Alice', 'Martin', ['alice@example.com'])]);
+        $bookB = new AddressBook(contacts: [
+            'n1' => $this->person('n1', 'Alice', 'Martin', ['alice@example.com']),
+            'other' => $this->person('other', 'Alice', 'Martin', ['alice@example.com']),
+        ]);
+
+        $plan = $this->planner->plan(new PlanInput($bookA, $bookB, [], [], []));
+
+        self::assertSame(['n1'], $plan->contactsCreateAToB, 'Runner adopts it in place, as it always did for a same-UID copy');
+        self::assertSame([], $plan->contactDuplicates);
     }
 }

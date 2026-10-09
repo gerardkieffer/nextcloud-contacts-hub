@@ -12,5 +12,5 @@ set -eu
 DOCKER="${DOCKER:-/Applications/Docker.app/Contents/Resources/bin/docker}"
 
 exec "$DOCKER" compose \
-	-f "$(cd "$(dirname "$0")" && pwd)/docker-compose.yml" \
+	-f "${COMPOSE_FILE:-$(cd "$(dirname "$0")" && pwd)/docker-compose.yml}" \
 	exec -T --user www-data app php occ "$@"

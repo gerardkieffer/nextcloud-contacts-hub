@@ -36,6 +36,54 @@ final class ClientTest extends TestCase
         self::assertStringContainsString('UID:c120', $byHref[$transport->collectionHref . 'c120.vcf']);
     }
 
+    public function testFetchAllCompletesCardsWhoseUidTheWholeCollectionAnswerLeftOut(): void
+    {
+        // Mailo's addressbook-query drops UID from every contact; GET and
+        // multiget keep it. Taken at face value the whole book was cards
+        // with no identity, and contacts the hub already shared by UID
+        // were reported as conflicts.
+        $transport = new FakeHttpTransport('https://x.example/');
+        for ($i = 1; $i <= 120; $i++) {
+            $href = $transport->collectionHref . "c{$i}.vcf";
+            $transport->resources[$href] = ['etag' => "\"e{$i}\"", 'body' => $this->vcard("c{$i}", "Contact {$i}")];
+        }
+        $transport->reportOmitsUid = true;
+
+        $all = (new Client($transport))->fetchAllVCards($transport->collectionHref);
+
+        self::assertCount(120, $all);
+        self::assertSame(3, $transport->multigetCallCount, '120 incomplete cards, fetched 50 at a time');
+        foreach ($all as $card) {
+            self::assertMatchesRegularExpression('/^UID:c\d+/m', $card['vcard']);
+        }
+    }
+
+    public function testFetchAllDoesNotRefetchWhenTheAnswerWasComplete(): void
+    {
+        $transport = new FakeHttpTransport('https://x.example/');
+        for ($i = 1; $i <= 5; $i++) {
+            $transport->resources[$transport->collectionHref . "c{$i}.vcf"] = ['etag' => "\"e{$i}\"", 'body' => $this->vcard("c{$i}", "Contact {$i}")];
+        }
+
+        (new Client($transport))->fetchAllVCards($transport->collectionHref);
+
+        self::assertSame(0, $transport->multigetCallCount, 'a well-behaved server pays nothing for this');
+    }
+
+    public function testACardThatReallyHasNoUidIsLeftAsItIs(): void
+    {
+        $transport = new FakeHttpTransport('https://x.example/');
+        $href = $transport->collectionHref . 'plain.vcf';
+        $body = "BEGIN:VCARD\r\nVERSION:3.0\r\nFN:No Identity\r\nEND:VCARD\r\n";
+        $transport->resources[$href] = ['etag' => '"e"', 'body' => $body];
+
+        $all = (new Client($transport))->fetchAllVCards($transport->collectionHref);
+
+        self::assertCount(1, $all);
+        self::assertSame(1, $transport->multigetCallCount, 'asked once, and the answer was no different');
+        self::assertStringNotContainsString('UID', $all[0]['vcard']);
+    }
+
     public function testFetchAllDoesNotFallBackOnAServerError(): void
     {
         // A 4xx/5xx is a refusal, not slowness -- retrying it as 16

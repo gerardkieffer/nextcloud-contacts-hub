@@ -350,12 +350,38 @@ class StateMapper extends Mapper
         $qb->executeStatement();
     }
 
-    public function updateRunProgress(int $runId, int $totalItems, int $processedItems): void
+    /**
+     * @param null|array{created: int, updated: int, deleted: int, archived: int, errors: int} $tally
+     *        what the run has done so far. Written in the same UPDATE as the
+     *        progress, because a run is resumed by a different process that
+     *        has only this row to go on; see Runner::runLocked().
+     */
+    public function updateRunProgress(int $runId, int $totalItems, int $processedItems, ?array $tally = null): void
     {
         $qb = $this->db->getQueryBuilder();
         $qb->update(self::RUNS)
             ->set('total_items', $qb->createNamedParameter($totalItems, IQueryBuilder::PARAM_INT))
             ->set('processed_items', $qb->createNamedParameter($processedItems, IQueryBuilder::PARAM_INT))
+            ->where($qb->expr()->eq('id', $qb->createNamedParameter($runId)));
+        foreach ($tally ?? [] as $column => $value) {
+            $qb->set($column, $qb->createNamedParameter($value, IQueryBuilder::PARAM_INT));
+        }
+        $qb->executeStatement();
+    }
+
+    /**
+     * What an unfinished run has reported so far, so the process that
+     * resumes it can carry on from there instead of from nothing.
+     *
+     * @param string[] $warnings
+     * @param string[] $errors
+     */
+    public function saveRunReport(int $runId, array $warnings, array $errors): void
+    {
+        $qb = $this->db->getQueryBuilder();
+        $qb->update(self::RUNS)
+            ->set('warnings_json', $qb->createNamedParameter(json_encode($warnings)))
+            ->set('errors_json', $qb->createNamedParameter(json_encode($errors)))
             ->where($qb->expr()->eq('id', $qb->createNamedParameter($runId)));
         $qb->executeStatement();
     }
@@ -519,7 +545,22 @@ class StateMapper extends Mapper
         ?string $endpointSnapshot,
         string $duplicateJson,
     ): void {
-        if ($this->hasUnresolvedConflict($jobId, $uid, 'contact')) {
+        // Re-detected on a later run: refresh it rather than keep the first
+        // sighting. Snapshots frozen at detection went on showing -- and,
+        // worse, resolving with -- a contact as it was weeks earlier, and a
+        // match whose existing copy had changed identity kept naming the old
+        // one. A job paused for conflicts does not run, so this cannot churn
+        // a row the user is looking at.
+        $existingId = $this->unresolvedConflictId($jobId, $uid, 'contact');
+        if ($existingId !== null) {
+            $qb = $this->db->getQueryBuilder();
+            $qb->update(self::CONFLICTS)
+                ->set('hub_snapshot', $qb->createNamedParameter($hubSnapshot))
+                ->set('endpoint_snapshot', $qb->createNamedParameter($endpointSnapshot))
+                ->set('duplicate_json', $qb->createNamedParameter($duplicateJson))
+                ->where($qb->expr()->eq('id', $qb->createNamedParameter($existingId)));
+            $qb->executeStatement();
+
             return;
         }
 
@@ -536,7 +577,7 @@ class StateMapper extends Mapper
         $qb->executeStatement();
     }
 
-    private function hasUnresolvedConflict(int $jobId, string $uid, string $kind): bool
+    private function unresolvedConflictId(int $jobId, string $uid, string $kind): ?int
     {
         $qb = $this->db->getQueryBuilder();
         $qb->select('id')->from(self::CONFLICTS)
@@ -546,7 +587,47 @@ class StateMapper extends Mapper
             ->andWhere($qb->expr()->isNull('resolved_at'))
             ->setMaxResults(1);
 
-        return $this->row($qb) !== null;
+        $row = $this->row($qb);
+
+        return $row === null ? null : (int) $row['id'];
+    }
+
+    /**
+     * Close every unresolved conflict of a job whose uid a fresh plan no
+     * longer detects, recording $resolution. Returns how many were closed.
+     *
+     * A conflict describes the situation at the moment it was detected, and
+     * that situation can go away on its own: the new contact deleted (often
+     * because the user removed the duplicate they had just made), the
+     * existing copy deleted, or the pair otherwise no longer matching. Left
+     * open, such a row offered buttons that acted on a contact that was no
+     * longer there -- "merge" overwrote the existing copy with a deleted
+     * contact's content, and the next run then mirrored that deletion,
+     * removing a contact that had only ever existed on the destination.
+     * Verified. It also kept a conflict-paused job paused indefinitely.
+     *
+     * Rows of a conflict kind that no longer exists (the same-UID edit
+     * conflicts of the removed two-way mode) are never re-detected either,
+     * so they are closed here too; nothing could resolve them otherwise.
+     *
+     * Only called with a complete plan -- never on a resumed segment, which
+     * plans nothing.
+     *
+     * @param string[] $stillDetected uids the current plan raised a conflict for
+     */
+    public function closeConflictsNotIn(int $jobId, array $stillDetected, string $resolution): int
+    {
+        $closed = 0;
+        $keep = array_flip($stillDetected);
+        foreach ($this->unresolvedConflicts($jobId) as $row) {
+            if ((string) $row['kind'] === 'contact' && $row['duplicate_json'] !== null && isset($keep[(string) $row['uid']])) {
+                continue;
+            }
+            $this->resolveConflict((int) $row['id'], $resolution);
+            $closed++;
+        }
+
+        return $closed;
     }
 
     /** @return list<array<string, mixed>> */
@@ -559,6 +640,23 @@ class StateMapper extends Mapper
             ->orderBy('detected_at');
 
         return $this->rows($qb);
+    }
+
+    /**
+     * Same rows as unresolvedConflicts(), but for a caller that only needs
+     * to know how many -- a count/emptiness check has no business paying
+     * for hub_snapshot/endpoint_snapshot/duplicate_json, which hold full
+     * vCard text (base64 photos included) and can dwarf every other column
+     * in the row combined.
+     */
+    public function countUnresolvedConflicts(int $jobId): int
+    {
+        $qb = $this->db->getQueryBuilder();
+        $qb->select($qb->func()->count('*', 'c'))->from(self::CONFLICTS)
+            ->where($qb->expr()->eq('job_id', $qb->createNamedParameter($jobId)))
+            ->andWhere($qb->expr()->isNull('resolved_at'));
+
+        return (int) ($this->row($qb)['c'] ?? 0);
     }
 
     /** @return array<string, mixed>|null */
@@ -581,7 +679,70 @@ class StateMapper extends Mapper
         $qb->executeStatement();
     }
 
+    /**
+     * For a job pulling into the hub: forget the source hash of every
+     * contact whose hub card is one of $hubUris, so the next run re-pushes
+     * the endpoint's version of it.
+     *
+     * Called after a snapshot restore rewrote those cards. A normal run
+     * never compares the destination's content, so without this the run
+     * after a restore re-created the contacts the restore had deleted (that
+     * check exists) but left the ones it had reverted reverted (that one
+     * does not) -- half the restore undone, half kept. Now the rule is
+     * one: whatever the endpoint still has, it wins.
+     *
+     * @param list<string> $hubUris
+     */
+    public function forgetSourceHashOfHubCards(int $jobId, array $hubUris): void
+    {
+        foreach (array_chunk(array_values(array_unique($hubUris)), 500) as $chunk) {
+            $qb = $this->db->getQueryBuilder();
+            $qb->update(self::CONTACT_STATE)
+                ->set('endpoint_hash', $qb->createNamedParameter(null))
+                ->where($qb->expr()->eq('job_id', $qb->createNamedParameter($jobId)))
+                ->andWhere($qb->expr()->in('hub_href', $qb->createNamedParameter($chunk, IQueryBuilder::PARAM_STR_ARRAY)));
+            $qb->executeStatement();
+        }
+    }
+
     // ------------------------------------------------------------- teardown
+
+    /**
+     * Forget what this job has synced, keeping its run history.
+     *
+     * For when the job starts pointing at something else: another address
+     * book, another endpoint, or another collection on its endpoint. State
+     * rows record *where* each contact lives -- on the endpoint as absolute
+     * URLs -- so kept across such a change they kept steering writes and
+     * deletions at the old location, carrying the new endpoint's
+     * credentials to the old endpoint's server. Verified.
+     *
+     * Open runs are closed (their queues were planned against the old
+     * target), unresolved conflicts are closed as obsolete, and contact and
+     * group state is dropped. The next run then starts as a first run:
+     * nothing is deleted anywhere, and contacts already present on the
+     * destination are matched up by UID rather than created twice.
+     */
+    public function resetSyncState(int $jobId, string $reason): void
+    {
+        $qb = $this->db->getQueryBuilder();
+        $qb->update(self::RUNS)
+            ->set('status', $qb->createNamedParameter('failed'))
+            ->set('paused_reason', $qb->createNamedParameter($reason))
+            ->set('finished_at', $qb->createNamedParameter($this->now()))
+            ->where($qb->expr()->eq('job_id', $qb->createNamedParameter($jobId)))
+            ->andWhere($qb->expr()->isNull('finished_at'));
+        $qb->executeStatement();
+
+        $this->closeConflictsNotIn($jobId, [], 'obsolete');
+
+        foreach ([self::CONTACT_STATE, self::GROUP_STATE] as $table) {
+            $qb = $this->db->getQueryBuilder();
+            $qb->delete($table)
+                ->where($qb->expr()->eq('job_id', $qb->createNamedParameter($jobId)));
+            $qb->executeStatement();
+        }
+    }
 
     /**
      * Remove every trace of a job: state, conflicts, runs and their items.

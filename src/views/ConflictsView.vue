@@ -4,7 +4,7 @@ import NcButton from '@nextcloud/vue/components/NcButton'
 import NcEmptyContent from '@nextcloud/vue/components/NcEmptyContent'
 import NcNoteCard from '@nextcloud/vue/components/NcNoteCard'
 import IconCheck from 'vue-material-design-icons/CheckCircleOutline.vue'
-import { showError, showSuccess } from '@nextcloud/dialogs'
+import { showError, showSuccess, showWarning } from '@nextcloud/dialogs'
 import { t } from '@nextcloud/l10n'
 
 import ContactDiff from '../components/ContactDiff.vue'
@@ -53,9 +53,17 @@ function sideLabel(conflict, role, base) {
 async function resolve(conflict, resolution) {
 	resolving.value = conflict.id
 	try {
-		await api.resolveConflict(conflict.id, resolution)
+		const result = await api.resolveConflict(conflict.id, resolution)
 		await store.loadConflicts()
-		showSuccess(t('contacthub', 'Conflict resolved'))
+		if (result.outcome === 'obsolete') {
+			// Not an error, but not what the user asked for either: say so.
+			showWarning(t('contacthub', 'This conflict no longer applied — one of the two contacts was changed or deleted since — so it was closed without changing anything.'))
+		} else {
+			showSuccess(t('contacthub', 'Conflict resolved'))
+		}
+		for (const warning of result.warnings ?? []) {
+			showWarning(warning)
+		}
 	} catch (error) {
 		showError(error.message)
 	} finally {
@@ -80,6 +88,12 @@ async function resolveBatch(choice, label) {
 			}))
 		} else {
 			showSuccess(t('contacthub', '{resolved} conflict(s) resolved', { resolved: result.resolved }))
+		}
+		if (result.obsolete > 0) {
+			showWarning(t('contacthub', '{obsolete} of them no longer applied — a contact had been changed or deleted since — and were closed without changing anything.', { obsolete: result.obsolete }))
+		}
+		for (const warning of result.warnings ?? []) {
+			showWarning(warning)
 		}
 	} catch (error) {
 		showError(error.message)

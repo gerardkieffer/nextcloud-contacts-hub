@@ -9,7 +9,7 @@
 set -eu
 
 DOCKER="${DOCKER:-/Applications/Docker.app/Contents/Resources/bin/docker}"
-COMPOSE_FILE="$(cd "$(dirname "$0")" && pwd)/docker-compose.yml"
+COMPOSE_FILE="${COMPOSE_FILE:-$(cd "$(dirname "$0")" && pwd)/docker-compose.yml}"
 APP=/var/www/html/custom_apps/contacthub
 
 exec "$DOCKER" compose -f "$COMPOSE_FILE" exec -T --user www-data app \

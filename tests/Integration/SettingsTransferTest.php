@@ -37,13 +37,13 @@ final class SettingsTransferTest extends IntegrationTestCase
     private function transfer(): SettingsTransfer
     {
         $books = new AddressBookService($this->backend);
-        $endpointService = new EndpointService($this->endpoints, new FakeClientFactory([], $this->probe));
+        $endpointService = new EndpointService($this->endpoints, new FakeClientFactory([], $this->probe), $this->jobs, $this->stateReset());
 
         return new SettingsTransfer(
             $this->endpoints,
             $this->jobs,
             $endpointService,
-            new JobService($this->jobs, $this->state, $books, $this->endpoints),
+            new JobService($this->jobs, $this->state, $books, $this->endpoints, $this->stateReset()),
             $books,
             $this->hubFolder(),
         );

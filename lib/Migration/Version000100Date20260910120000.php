@@ -155,8 +155,13 @@ class Version000100Date20260910120000 extends SimpleMigrationStep
     /**
      * The per-side bookkeeping both state tables share. Named for roles, not
      * for the Planner's a/b sides -- see the class docblock.
+     *
+     * Typed as object because createTable() returns a different class on
+     * each supported major: Doctrine's Table on Nextcloud 34, and on 35 an
+     * OC\DB\Schema\Table wrapper implementing OCP\DB\Schema\ITable, which
+     * 34 does not have. Naming either one fails the install on the other.
      */
-    private function addRoleColumns(\Doctrine\DBAL\Schema\Table $t): void
+    private function addRoleColumns(object $t): void
     {
         foreach (['hub', 'endpoint'] as $role) {
             $t->addColumn("{$role}_href", Types::STRING, ['notnull' => false, 'length' => 500]);

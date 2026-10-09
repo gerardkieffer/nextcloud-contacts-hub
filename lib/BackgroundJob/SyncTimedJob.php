@@ -12,6 +12,7 @@ use OCA\ContactHub\Sync\CronBudget;
 use OCA\ContactHub\Sync\RunAlreadyActive;
 use OCA\ContactHub\Sync\SyncJob;
 use OCP\AppFramework\Utility\ITimeFactory;
+use OCP\BackgroundJob\IJobList;
 use OCP\BackgroundJob\TimedJob;
 use Psr\Log\LoggerInterface;
 
@@ -60,6 +61,7 @@ class SyncTimedJob extends TimedJob
         private readonly StateMapper $state,
         private readonly RunService $runs,
         private readonly BackupService $backups,
+        private readonly IJobList $jobList,
         private readonly LoggerInterface $logger,
     ) {
         parent::__construct($time);
@@ -89,9 +91,14 @@ class SyncTimedJob extends TimedJob
     {
         $openRun = $this->state->findOpenRun($job->id);
 
-        // An open run is continued whatever the interval says; see the class
-        // docblock. Without this a paused run waits a whole interval.
-        if ($openRun === null && !$job->isDue()) {
+        // An open run is continued whatever the interval says, and whatever
+        // conflictPaused says -- see the class docblock on the interval part;
+        // the conflict-pause part matters because a job can only become
+        // conflictPaused partway through a multi-tick run, and stranding
+        // that run's queue in run_items until someone resolves conflicts
+        // manually would be worse than letting it finish what it already
+        // started. Only *starting a new* run is blocked while paused.
+        if ($openRun === null && (!$job->isDue() || $job->conflictPaused)) {
             return;
         }
 
@@ -110,6 +117,30 @@ class SyncTimedJob extends TimedJob
                     'count' => count($result->errors),
                     'errors' => $result->errors,
                 ]);
+            }
+
+            // Deliberately re-checked against the persisted conflicts table
+            // rather than $result->conflicts: that counter resets to zero on
+            // a resumed segment and would undercount a run that paused and
+            // resumed across ticks. Guarded by !conflictPaused so this fires
+            // exactly once, on the tick where conflicts first appear -- once
+            // paused, the guard above stops new runs, so this block is not
+            // reached again until a human resolves them.
+            if (!$job->conflictPaused) {
+                $unresolved = $this->state->countUnresolvedConflicts($job->id);
+                if ($unresolved > 0) {
+                    $this->jobs->setConflictPaused($job->id, $job->userId, true);
+                    // Queued, not sent inline: SMTP has no timeout this app
+                    // controls, and CronBudget only bounds the CardDAV I/O
+                    // above -- sending here would let one slow mail server
+                    // stall every other due job for the rest of this tick.
+                    // See SendConflictPauseNotification's docblock.
+                    $this->jobList->add(SendConflictPauseNotification::class, [
+                        'jobId' => $job->id,
+                        'userId' => $job->userId,
+                        'conflictCount' => $unresolved,
+                    ]);
+                }
             }
         } catch (RunAlreadyActive) {
             // Someone else holds the job: a browser mid-run, or an overlapping

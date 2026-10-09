@@ -19,20 +19,33 @@ already use. This app adds no contact storage of its own.
 - **Bridge two services.** iCloud ↔ Nextcloud ↔ Infomaniak, as two jobs
   sharing one address book.
 - **Duplicate detection.** A new contact that looks like an existing one —
-  same name plus a shared email or phone, under a different ID — is flagged
-  for you rather than guessed at. Nothing is changed until you decide.
-- **Deletions are your call.** Mirror them to the other side, or keep the
-  contact and tag it as archived instead.
+  the same email address, or the same name plus a shared phone number or
+  email, under a different ID — is flagged for you rather than guessed at.
+  An address several of your contacts share, like a household's or a
+  company's `info@`, only counts together with the name. Nothing is changed
+  for that contact until you decide.
+- **Deletions are your call.** When a contact is deleted from the source,
+  delete it from the destination too, or keep it there tagged as archived.
+  Only deletions on the source side of a job ever travel. A group that
+  disappears from the source is removed from the destination under either
+  policy; the policy is about contacts.
 - **Groups travel both ways.** Nextcloud stores groups as categories on each
   contact; services like iCloud want separate group records. Contacts Hub
-  translates between the two automatically, in both directions.
+  translates between the two automatically, in both directions, so you can
+  pull from one kind of service and push to the other. See
+  **[docs/groups.md](docs/groups.md)** for how, and what does not survive
+  the trip.
 - **Photos survive intact.** Including iCloud's habit of storing a photo as
   a reference to an authenticated URL rather than embedding it — those are
   fetched and re-embedded so the picture is not broken on the other end.
-- **Snapshots before every run that writes.** Kept 30 days, and saved into
-  **Contacts Hub/Snapshots** in your own files, so you can find and download
-  them from the Files app. Restoring takes its own snapshot first, so a
-  restore is itself undoable.
+- **Snapshots of the Nextcloud address book before every run that writes.**
+  Kept 30 days, and saved into **Contacts Hub/Snapshots** in your own files,
+  so you can find and download them from the Files app. Restoring takes its
+  own snapshot first, so a restore is itself undoable; see
+  [Restoring a snapshot](#restoring-a-snapshot). These cover the Nextcloud
+  side only — see
+  [Before you turn on mirror deletions](#before-you-turn-on-mirror-deletions)
+  for what that means for jobs that push to an endpoint.
 - **Export and import your setup.** Endpoints and sync jobs, written to
   **Contacts Hub/Settings** as readable JSON. Passwords are left out unless
   you tick the box.
@@ -44,7 +57,7 @@ already use. This app adds no contact storage of its own.
 
 ## Requirements
 
-- Nextcloud 34
+- Nextcloud 34 or 35
 - PHP 8.3 or newer
 
 No Composer install and no build step on the server: the app ships as plain
@@ -145,25 +158,136 @@ Nextcloud files.
 
 ## Before you turn on mirror deletions
 
-With the mirror deletion policy, a delete on one side becomes a delete on
-the other. Contacts Hub takes a snapshot of the address book before any run
-that writes, so a bad run is undoable, and the archive policy lets you keep
-a tagged copy instead of deleting. Even so: preview the first run.
+With the mirror deletion policy, a contact deleted from a job's source is
+deleted from its destination too. How undoable that is depends on the
+direction:
+
+- **Endpoint to Nextcloud (pull).** The destination is the Nextcloud address
+  book, and it is snapshotted before every run that writes, so a bad run can
+  be restored. After a restore, the job's next run puts back the endpoint's
+  version of every contact the endpoint still has — it is a one-way job, and
+  the endpoint is its source — and only what the endpoint no longer has
+  stays as restored. To keep a restored state as a whole, switch the job off
+  first.
+- **Nextcloud to endpoint (push).** The destination is the endpoint, and
+  **nothing snapshots it automatically** — the pre-run snapshot is of the
+  Nextcloud address book, which a push never changes, and the app has no way
+  to back up an endpoint. Export the endpoint's contacts with that service's
+  own tools before relying on mirror deletions there, or use the archive
+  policy, which keeps a tagged copy instead of deleting.
+
+Two safeguards apply in both directions:
+
+- **A run whose source suddenly reads as completely empty is refused** when
+  it would remove contacts synced from it before. An address book that
+  empties all at once has far more often been deleted, unshared or
+  misconfigured than really emptied. If you did empty it on purpose, delete
+  the contacts on the destination yourself, or delete the job and create it
+  again.
+- **A job whose Nextcloud address book has been deleted or unshared does not
+  run at all.** The run fails with an explanation in the job's history
+  instead of reading the missing book as an empty one.
+
+Even so: preview the first run.
+
+### Restoring a snapshot
+
+Open **Snapshots**, pick the address book, and click **Restore…** next to the
+snapshot you want. You choose between two ways of restoring:
+
+- **Put back what the snapshot has** — deleted contacts come back and changed
+  ones are reverted; contacts added since are kept.
+- **Make it exactly as it was** — the same, and contacts added since the
+  snapshot are deleted.
+
+Before you confirm, the screen says what the sync jobs using that address
+book will do next: a pull job puts back the endpoint's version of what the
+endpoint still has, and a push job sends the restored address book on to
+its endpoint, deletions included under the mirror policy. It offers to
+switch those jobs off first, ticked by default, so nothing syncs until you
+have checked the result; switch them back on from **Sync jobs**.
+
+A restore takes a snapshot of its own first, so it can itself be undone the
+same way. **Take a snapshot now** makes one by hand. A book shared with you
+read-only can't be restored.
+
+## Changing what a job syncs
+
+A job remembers where every contact it synced lives on each side. Moving a
+job to **another address book or another endpoint**, or moving an endpoint
+to **another collection, server or account**, makes all of that wrong, so
+the affected jobs **start over as if they had never run**: open runs are
+closed, open conflicts are closed, and the next run is a first run. Nothing
+is deleted on that run, and contacts that are already on the destination
+under the same ID are updated in place rather than created a second time.
+
+Changing an endpoint's server address or username also clears its chosen
+collection, so run the capability test again to pick one. Saving any of
+these changes is refused while one of the affected jobs is in the middle of
+a run.
+
+Changing only a job's **direction** keeps what it knows: both locations stay
+valid.
+
+## Shared address books
+
+Address books other people share with you can be used like your own, with
+one rule: a book shared **read-only** can only be a source. A job pulling
+into it is refused when you save it, and refused again at run time if the
+share has become read-only since. If a share is withdrawn, its jobs stop
+running and say why.
 
 ## Resolving conflicts
 
-When a new contact looks like one you already have — same name plus a
-shared email or phone, under a different ID — it lands on the **Conflicts**
-screen rather than being guessed at. You get the two copies side by side
-with the differing fields highlighted, and choices to merge them into one,
-keep both as separate contacts, archive the existing copy first, or cancel.
-Contacts Hub never merges these on its own.
+When a new contact looks like one you already have — the same email
+address, or the same name plus a shared phone number or email, under a
+different ID — it lands on the **Conflicts** screen rather than being
+guessed at. An email address that several contacts on either side share (a
+household's, a company's `info@`) is not enough on its own: it says nothing
+about *which* of those people a new contact is. You
+get the two copies side by side with the differing fields highlighted, and
+choices to merge them into one, keep both as separate contacts, archive the
+existing copy first, or cancel. Contacts Hub never merges these on its own.
+
+A contact with the **same ID** on both sides is not a conflict: it is the
+same contact, and the destination copy is updated from the source like any
+other. This is what happens when you import a `.vcf` into Nextcloud and only
+then set up a job pulling the same contacts.
+
+Choices act on the contacts **as they are when you click**, not as they were
+when the conflict was found, and whatever is written goes through the same
+steps as a sync (the job's photo setting, groups as categories). A conflict
+can stop applying on its own — most often because you deleted the duplicate
+yourself. Such conflicts are closed without changing anything, either by the
+next run or when you click on one, and the screen tells you so.
 
 Anything archived while resolving a conflict is written as a plain `.vcf`
 file into **Contacts Hub / Archived contacts** in your own Files, not back
 into an address book. You can open it, send it on, or import it again if you
 decide you wanted that copy after all; nothing syncs it anywhere. A name
 already taken is never overwritten — the second file gets a timestamp.
+
+### When a scheduled run finds conflicts
+
+A scheduled run that leaves unresolved conflicts **pauses its job**: no
+further scheduled runs start until every conflict for that job is resolved,
+and then the job resumes by itself. The Sync jobs screen shows the job as
+*paused (conflicts)*. Manual runs are not blocked.
+
+When a job pauses, you get **one email** about it. Where it goes is set in
+**Personal settings → Contacts Hub**:
+
+- **Your profile address** — the default. Notifications are on as soon as
+  your Nextcloud profile has a valid email address, with nothing to switch
+  on.
+- **A different address** — any address you type there.
+- **Off** — no email. Paused jobs still show in the app.
+
+The email is sent through Nextcloud's own outgoing mail, so the
+administrator has to have set that up (*Administration settings → Basic
+settings → Email server*). If it looks unconfigured, or a recent
+notification failed to send, both the settings page and the Sync jobs
+screen say so.
 
 ## Automation
 
@@ -232,12 +356,16 @@ only if you need it.
 
 ## Configuration
 
-Two values have no settings screen yet:
+Three values have no settings screen yet:
 
 ```bash
 occ config:app:set contacthub http_timeout_seconds --value=30
 occ config:app:set contacthub backup_retention_days --value=30
+occ config:app:set contacthub web_time_budget_seconds --value=20
 ```
+
+The last bounds a run started from the browser, and is clamped to 5–120
+seconds; see [docs/timeouts.md](docs/timeouts.md).
 
 ## Known limitations
 
@@ -245,18 +373,20 @@ occ config:app:set contacthub backup_retention_days --value=30
   the capability test but not implemented for live sync. Jobs targeting such
   an endpoint warn and skip group changes.
 - **Category renames on passthrough endpoints (iCloud-style group vCards)
-  read as delete-plus-create.** Renaming a group in Nextcloud reads as
-  delete-plus-create on services that use separate group records, because
-  the group's identity on that side is derived from its name. Membership
-  survives; the group's identity on that side does not.
+  read as delete-plus-create.** Renaming a group in Nextcloud deletes the
+  old group and creates a new one on services that use separate group
+  records, because the group's identity on that side is derived from its
+  name. Membership survives; the group's identity on that side does not. This and the other
+  group edge cases are in [docs/groups.md](docs/groups.md).
 - **A contact photo stored as a non-image data URI** is dropped by
   Nextcloud's own storage layer on the way in.
 - **The Mailo preset is user-reported**, not verified against a live account
   by this project. iCloud and Infomaniak have been tested directly.
 - **Google Contacts is not supported.** Only HTTP Basic authentication is
   implemented, and Google's CardDAV requires OAuth 2.0.
-- **Snapshots and endpoint backups are one-shot**, not resumable like sync
-  runs. Very large address books over a slow connection could hit a PHP
+- **Endpoints are never backed up** by this app, before a push or otherwise
+  (see [Before you turn on mirror deletions](#before-you-turn-on-mirror-deletions)).
+- **Snapshots are one-shot**, not resumable like sync runs. Very large address books over a slow connection could hit a PHP
   execution limit.
 
 ## Roadmap

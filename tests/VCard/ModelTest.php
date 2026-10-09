@@ -281,4 +281,74 @@ final class ModelTest extends TestCase
         self::assertInstanceOf(Contact::class, $parsed);
         self::assertSame($names, $parsed->categories);
     }
+
+    private const string NO_UID = "BEGIN:VCARD\r\nVERSION:3.0\r\nFN:Alice Martin\r\nN:Martin;Alice;;;\r\nEMAIL:alice@example.com\r\nEND:VCARD\r\n";
+
+    public function testACardWithoutAUidIsUnreadableUnlessAnIdentityIsGiven(): void
+    {
+        $this->expectException(VCardParseException::class);
+        Model::parse(self::NO_UID);
+    }
+
+    public function testACardWithoutAUidTakesTheGivenIdentityAndSaysSo(): void
+    {
+        $uid = Model::derivedUid('https://x.example/book/a.vcf');
+        $parsed = Model::parse(self::NO_UID, $uid);
+
+        self::assertInstanceOf(Contact::class, $parsed);
+        self::assertSame($uid, $parsed->uid);
+        self::assertTrue($parsed->uidDerived);
+        self::assertSame('Alice', $parsed->firstName);
+    }
+
+    public function testACardThatHasAUidKeepsItEvenWhenAnIdentityIsGiven(): void
+    {
+        $parsed = Model::parse("BEGIN:VCARD\r\nVERSION:3.0\r\nUID:real\r\nFN:A\r\nEND:VCARD\r\n", 'ignored');
+
+        self::assertSame('real', $parsed->uid);
+        self::assertFalse($parsed->uidDerived);
+    }
+
+    public function testADerivedUidIsStablePerHrefAndDiffersBetweenHrefs(): void
+    {
+        self::assertSame(Model::derivedUid('/a.vcf'), Model::derivedUid('/a.vcf'));
+        self::assertNotSame(Model::derivedUid('/a.vcf'), Model::derivedUid('/b.vcf'));
+        self::assertMatchesRegularExpression('/^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/', Model::derivedUid('/a.vcf'));
+    }
+
+    public function testAnAddressBookReadsUidlessCardsWhenItKnowsWhereTheyLive(): void
+    {
+        [$book, $warnings] = Model::buildAddressBook([self::NO_UID, self::NO_UID], 'Mailo', null, ['/1.vcf', '/2.vcf']);
+
+        self::assertCount(2, $book->contacts, 'two cards, two identities');
+        self::assertSame([], $warnings);
+    }
+
+    public function testUnreadableCardsAreReportedOncePerReason(): void
+    {
+        // Used to be one identical warning per card -- hundreds, on a large
+        // address book -- with nothing to say which card was meant.
+        // Without a location a UID-less card really is unreadable: one line.
+        [$book, $warnings] = Model::buildAddressBook(array_fill(0, 40, self::NO_UID), 'Mailo');
+        self::assertCount(0, $book->contacts);
+        self::assertCount(1, $warnings);
+        self::assertStringContainsString('40 cards in Mailo could not be read (vCard has no UID)', $warnings[0]);
+    }
+
+    public function testTwoCardsThatDifferOnlyInTheModificationDateHashAlike(): void
+    {
+        $a = "BEGIN:VCARD\r\nVERSION:3.0\r\nUID:u\r\nFN:Alice\r\nREV:2024-01-01T00:00:00Z\r\nEND:VCARD\r\n";
+        $b = "BEGIN:VCARD\nVERSION:3.0\nUID:u\nFN:Alice\nREV:2026-10-09T10:53:01Z\nEND:VCARD\n";
+
+        self::assertSame(Model::contentHashIgnoringRev($a), Model::contentHashIgnoringRev($b), 'line endings and REV are not content');
+        self::assertNotSame(Model::textHash($a), Model::textHash($b), 'the stored hash still counts REV: its meaning must not change');
+    }
+
+    public function testACardThatDiffersInContentDoesNotHashAlike(): void
+    {
+        $a = "BEGIN:VCARD\r\nVERSION:3.0\r\nUID:u\r\nFN:Alice\r\nREV:1\r\nEND:VCARD\r\n";
+        $b = "BEGIN:VCARD\r\nVERSION:3.0\r\nUID:u\r\nFN:Alice\r\nNOTE:x\r\nREV:1\r\nEND:VCARD\r\n";
+
+        self::assertNotSame(Model::contentHashIgnoringRev($a), Model::contentHashIgnoringRev($b));
+    }
 }

@@ -104,7 +104,11 @@ final class JobValidatorTest extends TestCase
         $text = $this->messages($warnings);
 
         self::assertStringContainsString('same endpoint collection', $text);
-        self::assertStringContainsString("delete the other's contacts", $text, 'mirror deletion makes this actively destructive');
+        self::assertStringContainsString('overwritten by whichever job ran last', $text);
+        // It used to claim each job would delete the other's contacts under
+        // mirror deletion. A job only ever deletes what it synced itself, so
+        // that was a warning about a risk that did not exist.
+        self::assertStringNotContainsString('delete', $text);
     }
 
     public function testTwoAddressBooksPullingFromOneEndpointAreNotFlaggedAsCompetingWriters(): void

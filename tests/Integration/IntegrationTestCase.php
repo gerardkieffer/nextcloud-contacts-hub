@@ -173,6 +173,7 @@ abstract class IntegrationTestCase extends TestCase
         return new SideFactory(
             $this->backend,
             new FakeClientFactory([$this->endpointId => $this->transport]),
+            new AddressBookService($this->backend),
         );
     }
 
@@ -185,6 +186,11 @@ abstract class IntegrationTestCase extends TestCase
             $this->sideFactory(),
             $withBackups ? $this->backupService() : null,
         );
+    }
+
+    protected function stateReset(): \OCA\ContactHub\Service\SyncStateReset
+    {
+        return new \OCA\ContactHub\Service\SyncStateReset($this->jobs, $this->state, $this->locks);
     }
 
     protected function conflictApplier(): ConflictApplier

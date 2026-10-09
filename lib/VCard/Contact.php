@@ -26,6 +26,8 @@ final class Contact
         public readonly array $emails = [],
         public readonly array $phones = [],
         public readonly array $categories = [],
+        /** The card had no UID property; $uid is derived from where the server keeps it. See Model::derivedUid(). */
+        public readonly bool $uidDerived = false,
     ) {
     }
 }

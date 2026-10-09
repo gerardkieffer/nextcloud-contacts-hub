@@ -70,4 +70,23 @@ interface SyncSide
 
     /** Where a resource for $uid should live on this side. */
     public function hrefFor(string $uid): string;
+
+    /**
+     * Whether $href is a location on this side at all.
+     *
+     * Stored state can name a location this side no longer is -- an
+     * endpoint moved to another collection or server before state was reset
+     * on such a move. Anything acting on a stored href asks this first, and
+     * treats a foreign one as "no copy here" rather than sending a write
+     * (and this side's credentials) somewhere else.
+     */
+    public function owns(string $href): bool;
+
+    /**
+     * The one spelling of $href this side uses in its listings, so a stored
+     * href compares equal to the live one. An endpoint's hrefs are URLs with
+     * many equivalent spellings (see CardDav\Href); Nextcloud's are opaque
+     * names read back verbatim.
+     */
+    public function normalizeHref(string $href): string;
 }

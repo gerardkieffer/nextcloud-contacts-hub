@@ -4,10 +4,10 @@ Findings from direct, hands-on protocol testing of the real servers this
 project has actually been run against. Purpose: record what each server
 does on the wire so we never have to re-derive this empirically again.
 
-**This app is a contact hub: it holds address books of its own and
-syncs each of them with CardDAV endpoints**, pushing to them, pulling
-from them, or both. Any server below can be an endpoint in any of those
-directions. The notes in sections 1-3 describe each server's own protocol
+**This app is a contact hub: it syncs Nextcloud's own address books with
+CardDAV endpoints**, one way per job, pushing to them or pulling from them.
+Any server below can be an endpoint in either direction. The notes in
+sections 1-3 describe each server's own protocol
 behavior, independent of which direction a given job runs in.
 
 Testing history: Phase 0 testing against Infomaniak on 2026-07-19 (test

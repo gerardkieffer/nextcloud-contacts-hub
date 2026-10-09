@@ -8,14 +8,44 @@ final class Model
 {
     private const string MEMBER_PREFIX = 'urn:uuid:';
 
-    public static function parse(string $rawText): Contact|Group
+    /** Namespace of Model::derivedUid(); fixed, because changing it re-identifies every UID-less card. */
+    private const string HREF_NAMESPACE = '6f1d7c3e-2b54-4c8a-9d0e-7a3b5e1c4f20';
+
+    /**
+     * An identity for a card that has none.
+     *
+     * UID is optional in vCard (RFC 6350 section 6.7.6), and some servers --
+     * Mailo's contacts are an example -- keep cards without one. The only
+     * identity such a card has is where the server keeps it, and that is
+     * stable across runs, so the identity is derived from it. It is never
+     * written into a card on its own side: the card stays exactly as the
+     * server has it.
+     *
+     * @param string $href the canonical href Client hands out
+     */
+    public static function derivedUid(string $href): string
+    {
+        return Uuid::v5(self::HREF_NAMESPACE, $href);
+    }
+
+    /**
+     * @param string|null $fallbackUid used when the card has no UID of its own, in
+     *        which case the result is flagged uidDerived. Without it a card with no
+     *        UID is unreadable, as it always was.
+     */
+    public static function parse(string $rawText, ?string $fallbackUid = null): Contact|Group
     {
         $doc = Document::parse($rawText);
 
         $uidProp = $doc->first('UID');
         $uid = $uidProp !== null ? trim($uidProp->value) : '';
+        $derived = false;
         if ($uid === '') {
-            throw new VCardParseException('vCard has no UID');
+            if ($fallbackUid === null || $fallbackUid === '') {
+                throw new VCardParseException('vCard has no UID');
+            }
+            $uid = $fallbackUid;
+            $derived = true;
         }
 
         $revProp = $doc->first('REV');
@@ -25,7 +55,7 @@ final class Model
         if (self::isGroup($doc)) {
             $fnProp = $doc->first('FN');
             $name = $fnProp !== null ? trim($fnProp->value) : $uid;
-            return new Group($uid, $name, self::memberUids($doc), $rawText, $rev);
+            return new Group($uid, $name, self::memberUids($doc), $rawText, $rev, $derived);
         }
 
         $fnProp = $doc->first('FN');
@@ -52,6 +82,7 @@ final class Model
             self::propertyValues($doc, 'EMAIL'),
             self::propertyValues($doc, 'TEL'),
             self::categories($doc),
+            $derived,
         );
     }
 
@@ -130,18 +161,27 @@ final class Model
      *        is a pure parser with tests that have no sides.
      * @param int|null $listedCount how many entries that address book says it
      *        holds, when the caller knows. See danglingMembersWarning().
+     * @param list<string>|null $hrefs where each of $rawTexts lives, in the same
+     *        order. A card with no UID of its own takes its identity from this
+     *        (see derivedUid()); without it such a card is unreadable.
      * @return array{0: AddressBook, 1: string[]} address book + warnings
      */
-    public static function buildAddressBook(array $rawTexts, string $sideLabel = '', ?int $listedCount = null): array
-    {
+    public static function buildAddressBook(
+        array $rawTexts,
+        string $sideLabel = '',
+        ?int $listedCount = null,
+        ?array $hrefs = null,
+    ): array {
         $book = new AddressBook();
         $warnings = [];
+        $unreadable = [];
 
-        foreach ($rawTexts as $rawText) {
+        foreach (array_values($rawTexts) as $i => $rawText) {
+            $href = $hrefs[$i] ?? null;
             try {
-                $item = self::parse($rawText);
+                $item = self::parse($rawText, $href !== null ? self::derivedUid($href) : null);
             } catch (VCardParseException $e) {
-                $warnings[] = $e->getMessage();
+                $unreadable[$e->getMessage()][] = $href;
                 continue;
             }
             if ($item instanceof Group) {
@@ -149,6 +189,25 @@ final class Model
             } else {
                 $book->contacts[$item->uid] = $item;
             }
+        }
+
+        // One warning per reason, never one per card: a server whose cards are
+        // all unreadable the same way would otherwise write hundreds of
+        // identical lines on every run -- and, before UID-less cards were
+        // readable, did, with nothing to say which card was meant.
+        foreach ($unreadable as $reason => $where) {
+            $count = count($where);
+            $label = $sideLabel !== '' ? " in {$sideLabel}" : '';
+            $known = array_values(array_filter($where, 'is_string'));
+            $warnings[] = sprintf(
+                '%d card%s%s could not be read (%s) and %s skipped%s',
+                $count,
+                $count === 1 ? '' : 's',
+                $label,
+                $reason,
+                $count === 1 ? 'was' : 'were',
+                $known !== [] ? ': ' . self::truncatedList($known, 3) : '.',
+            );
         }
 
         foreach ($book->groups as $group) {
@@ -195,10 +254,7 @@ final class Model
     ): string {
         $where = $sideLabel !== '' ? " in {$sideLabel}" : '';
         $count = count($missing);
-        $shown = implode(', ', array_slice($missing, 0, self::MEMBERS_LISTED));
-        $rest = $count > self::MEMBERS_LISTED
-            ? ' and ' . ($count - self::MEMBERS_LISTED) . ' more'
-            : '';
+        $shownAndRest = self::truncatedList($missing, self::MEMBERS_LISTED);
 
         // How much of that address book was actually read, when the caller
         // knows. "Not in that address book" and "not in the part of it we
@@ -212,8 +268,27 @@ final class Model
             : '';
 
         return $count === 1
-            ? "Group '{$group->name}' ({$group->uid}){$where}{$read} lists a member that is not in that address book: {$shown}"
-            : "Group '{$group->name}' ({$group->uid}){$where}{$read} lists {$count} members that are not in that address book: {$shown}{$rest}";
+            ? "Group '{$group->name}' ({$group->uid}){$where}{$read} lists a member that is not in that address book: {$shownAndRest}"
+            : "Group '{$group->name}' ({$group->uid}){$where}{$read} lists {$count} members that are not in that address book: {$shownAndRest}";
+    }
+
+    /**
+     * "a, b, c and N more" -- the first $limit items joined, plus a count of
+     * whatever didn't fit. Shared by every warning that lists an unbounded
+     * set of names in one aggregated line (see CLAUDE.md on bounded
+     * warnings): the aggregation itself is the safety property, so it must
+     * stay one implementation rather than being redefined per caller with
+     * its own limit and wording that can drift from this one.
+     *
+     * @param string[] $items
+     */
+    public static function truncatedList(array $items, int $limit): string
+    {
+        $count = count($items);
+        $shown = implode(', ', array_slice($items, 0, $limit));
+        $rest = $count > $limit ? ' and ' . ($count - $limit) . ' more' : '';
+
+        return $shown . $rest;
     }
 
     public static function contactContentHash(Contact $contact): string
@@ -232,6 +307,28 @@ final class Model
     public static function textHash(string $vcardText): string
     {
         return hash('sha256', str_replace(["\r\n", "\r"], "\n", $vcardText));
+    }
+
+    /**
+     * Content hash that ignores the modification date, or null when the text
+     * cannot be parsed.
+     *
+     * For asking whether two copies of a card say the same thing, never for
+     * stored state: every stored hash is textHash(), REV included, and
+     * changing what it means would make every tracked contact look edited at
+     * once. Both texts are re-serialised the same way first, so folding and
+     * line endings cannot make equal cards differ.
+     */
+    public static function contentHashIgnoringRev(string $vcardText): ?string
+    {
+        try {
+            $doc = Document::parse($vcardText);
+        } catch (\Throwable) {
+            return null;
+        }
+        $doc->remove('REV');
+
+        return self::textHash($doc->serialize());
     }
 
     public static function groupContentHash(Group $group): string

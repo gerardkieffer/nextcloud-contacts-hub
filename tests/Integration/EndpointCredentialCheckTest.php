@@ -39,7 +39,7 @@ final class EndpointCredentialCheckTest extends IntegrationTestCase
         // id 0 before it exists and under its real id afterwards, so pinning
         // specific ids would leave half the checks talking to a different,
         // always-healthy server.
-        return new EndpointService($this->endpoints, new FakeClientFactory([], $this->probe));
+        return new EndpointService($this->endpoints, new FakeClientFactory([], $this->probe), $this->jobs, $this->stateReset());
     }
 
     /** @return array<string, mixed> */

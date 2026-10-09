@@ -21,7 +21,7 @@ INFO="$REPO/appinfo/info.xml"
 # Only what the server actually reads. Notably absent: src/ (build input),
 # tests/, dev/, node_modules/, and js/*.map -- the source map alone is 6.4 MB,
 # more than twenty times the rest of the package put together.
-RUNTIME_DIRS='appinfo lib templates'
+RUNTIME_DIRS='appinfo img lib templates'
 BUNDLE='js/contacthub-main.mjs'
 
 die() { echo "package: $*" >&2; exit 1; }
@@ -56,15 +56,20 @@ for dir in $RUNTIME_DIRS; do
 	[ -d "$REPO/$dir" ] || die "missing $dir/"
 	cp -R "$REPO/$dir" "$APP/"
 done
-cp "$REPO/$BUNDLE" "$APP/js/"
+# Every module, not just the entry point named above: with two entries (the
+# app and the personal settings form) Vite splits their shared code into a
+# hashed *.chunk.mjs that both import at runtime. Copying only the entry
+# produced a package that installed cleanly and then failed to load either
+# page. The licence sidecars belong next to the bundles they describe.
+for f in "$REPO"/js/*.mjs "$REPO"/js/*.mjs.license; do
+	if [ -f "$f" ]; then
+		cp "$f" "$APP/js/"
+	fi
+done
 
-# The licence sidecar belongs next to the bundle it describes; the README is
-# what someone finds when they go looking inside the installed app. Written as
-# `if` rather than `[ ... ] && cp`, which under `set -e` exits the whole script
-# the moment the file is absent.
-if [ -f "$REPO/js/contacthub-main.mjs.license" ]; then
-	cp "$REPO/js/contacthub-main.mjs.license" "$APP/js/"
-fi
+# The README is what someone finds when they go looking inside the installed
+# app. Written as `if` rather than `[ ... ] && cp`, which under `set -e` exits
+# the whole script the moment the file is absent.
 if [ -f "$REPO/README.md" ]; then
 	cp "$REPO/README.md" "$APP/"
 fi

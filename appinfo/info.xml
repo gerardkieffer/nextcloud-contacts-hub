@@ -8,6 +8,11 @@
       unhelpful error.
     * <dependencies><nextcloud max-version> gates installation. Bump it
       deliberately after testing against the new major, never speculatively.
+      Nextcloud has no separate "tested up to" field: max-version is both.
+      An admin on a newer, untested major can still run
+      occ app:enable force contacthub (two hyphens before force), which
+      Nextcloud records in app_install_overwrite and forgets again at the
+      next major upgrade, so each untested major is opted into once.
 
     Background jobs and settings sections are registered here too, but only
     once the classes they name actually exist. Nextcloud resolves them on app
@@ -44,7 +49,7 @@ talking to each other directly.
 Contacts stay where they belong: in Nextcloud's own address books, editable in
 the Contacts app and reachable from every CardDAV client you already use.
     ]]></description>
-    <version>0.1.14</version>
+    <version>0.2.3</version>
     <licence>agpl</licence>
     <author mail="gerard.kieffer@ikmail.com" homepage="https://www.gerardkieffer.net">Gérard Kieffer</author>
     <namespace>ContactHub</namespace>
@@ -57,12 +62,17 @@ the Contacts app and reachable from every CardDAV client you already use.
         <!-- The ported engine uses typed class constants (PHP 8.3). Nextcloud 34
              still allows 8.2, but it is deprecated there, so 8.3 is the floor. -->
         <php min-version="8.3"/>
-        <nextcloud min-version="34" max-version="34"/>
+        <nextcloud min-version="34" max-version="35"/>
     </dependencies>
 
     <background-jobs>
         <job>OCA\ContactHub\BackgroundJob\SyncTimedJob</job>
     </background-jobs>
+
+    <settings>
+        <personal>OCA\ContactHub\Settings\Personal</personal>
+        <personal-section>OCA\ContactHub\Settings\PersonalSection</personal-section>
+    </settings>
 
     <navigations>
         <navigation>

@@ -26,6 +26,7 @@ class JobService
         private readonly StateMapper $state,
         private readonly AddressBookService $addressBooks,
         private readonly EndpointMapper $endpoints,
+        private readonly SyncStateReset $reset,
     ) {
     }
 
@@ -70,8 +71,28 @@ class JobService
     /** @param array<string, mixed> $input */
     public function update(int $id, string $userId, array $input): void
     {
-        $this->require($id, $userId);
-        $this->mapper->update($id, $userId, $this->validate($input, $userId, isCreate: false));
+        $existing = $this->require($id, $userId);
+        $data = $this->validate($input, $userId, isCreate: false, existing: $existing);
+
+        $movedBook = isset($data['address_book_id']) && $data['address_book_id'] !== $existing->addressBookId;
+        $movedEndpoint = isset($data['endpoint_id']) && $data['endpoint_id'] !== $existing->endpoint->id;
+        if (!$movedBook && !$movedEndpoint) {
+            $this->mapper->update($id, $userId, $data);
+
+            return;
+        }
+
+        // The job now syncs something else, so what it remembers about the
+        // old target has to go -- see SyncStateReset.
+        $this->reset->applyAndReset(
+            [$id],
+            $userId,
+            $movedBook
+                ? 'The job was moved to another address book; starting over from a first run.'
+                : 'The job was moved to another endpoint; starting over from a first run.',
+            $movedBook ? 'address_book_id' : 'endpoint_id',
+            fn() => $this->mapper->update($id, $userId, $data),
+        );
     }
 
     public function delete(int $id, string $userId): void
@@ -100,6 +121,18 @@ class JobService
         return (new JobValidator($this->mapper->allForUser($userId)))->check($job);
     }
 
+    /**
+     * Clears a job's conflict-pause once it has no unresolved conflicts
+     * left -- the only path back to scheduled runs, called after a
+     * conflict is resolved. A harmless no-op when the job was not paused.
+     */
+    public function resumeIfNoConflicts(int $jobId, string $userId): void
+    {
+        if ($this->state->countUnresolvedConflicts($jobId) === 0) {
+            $this->mapper->setConflictPaused($jobId, $userId, false);
+        }
+    }
+
     /** @return array<string, mixed> */
     private function present(SyncJob $job): array
     {
@@ -119,6 +152,8 @@ class JobService
             'enabled' => $job->enabled,
             'last_run_at' => $job->lastRunAt,
             'is_due' => $job->isDue(),
+            'conflict_paused' => $job->conflictPaused,
+            'conflict_paused_at' => $job->conflictPausedAt,
         ];
     }
 
@@ -126,7 +161,7 @@ class JobService
      * @param array<string, mixed> $input
      * @return array<string, mixed>
      */
-    private function validate(array $input, string $userId, bool $isCreate): array
+    private function validate(array $input, string $userId, bool $isCreate, ?SyncJob $existing = null): array
     {
         $errors = [];
         $data = [];
@@ -213,6 +248,23 @@ class JobService
         foreach (['include_photos', 'enabled'] as $flag) {
             if (array_key_exists($flag, $input)) {
                 $data[$flag] = (bool) $input[$flag];
+            }
+        }
+
+        // A pull job writes into its address book, which a read-only share
+        // does not allow. Checked against the job as it will be after this
+        // save, since an edit may change only the direction or only the book.
+        // SideFactory refuses at run time as well; this says so at the form.
+        $bookId = $data['address_book_id'] ?? $existing?->addressBookId;
+        $direction = $data['direction'] ?? $existing?->direction;
+        if (!isset($errors['address_book_id']) && $bookId !== null && $direction === SyncJob::FROM_ENDPOINT) {
+            try {
+                $this->addressBooks->requireWritable($bookId, $userId);
+            } catch (AddressBookReadOnly) {
+                $errors['address_book_id'] = 'This address book is shared with you read-only, and a job pulling '
+                    . 'into it would write to it. Pick one you can write to.';
+            } catch (AddressBookNotAccessible) {
+                $errors['address_book_id'] = 'Pick an address book you have access to.';
             }
         }
 

@@ -6,6 +6,7 @@ namespace OCA\ContactHub\Sync;
 
 use OCA\ContactHub\Db\StateMapper;
 use OCA\ContactHub\Files\HubFolder;
+use OCA\ContactHub\VCard\Contact;
 use OCA\ContactHub\VCard\Model;
 
 /**
@@ -38,6 +39,10 @@ class ConflictApplier
     public const string ENDPOINT = 'endpoint';
     public const string ARCHIVE = 'archive';
     public const string CANCEL = 'cancel';
+
+    /** What apply() did: the user's choice, or nothing because the conflict no longer stood. */
+    public const string APPLIED = 'applied';
+    public const string OBSOLETE = 'obsolete';
 
     public function __construct(
         private readonly StateMapper $state,
@@ -73,8 +78,11 @@ class ConflictApplier
         return [$sourceRole, $sourceRole === self::HUB ? self::ENDPOINT : self::HUB];
     }
 
-    /** @param array<string, mixed> $conflictRow */
-    public function apply(SyncJob $job, array $conflictRow, string $resolution): void
+    /**
+     * @param array<string, mixed> $conflictRow
+     * @return array{outcome: string, warnings: list<string>} outcome is APPLIED or OBSOLETE
+     */
+    public function apply(SyncJob $job, array $conflictRow, string $resolution): array
     {
         if (!in_array($resolution, [self::HUB, self::ENDPOINT, self::ARCHIVE, self::CANCEL], true)) {
             throw new \InvalidArgumentException("resolution must be 'hub', 'endpoint', 'archive', or 'cancel'");
@@ -84,7 +92,7 @@ class ConflictApplier
             throw new \RuntimeException('Conflict row carries no duplicate_json; only duplicate-match conflicts can be resolved.');
         }
 
-        $this->applyDuplicate($job, $conflictRow, $resolution);
+        return $this->applyDuplicate($job, $conflictRow, $resolution);
     }
 
     /**
@@ -98,9 +106,24 @@ class ConflictApplier
      * tracking something in contact_state so the next run's detection
      * never re-flags the same pair.
      *
+     * # Live content, not the snapshots
+     *
+     * Both contacts are read again here, and a conflict whose contacts are
+     * no longer there is closed as obsolete without touching anything. The
+     * snapshots are what the user was *shown*; acting on them is what went
+     * wrong. A conflict outlives its contacts -- the commonest case is the
+     * user deleting the duplicate they had just created -- and "merge" on
+     * such a row overwrote the existing copy with a contact that no longer
+     * existed, after which the next run mirrored that deletion and removed
+     * a contact that had only ever lived on the destination. Verified.
+     *
+     * What is written goes through DestinationRenderer, the same pipeline
+     * a run uses. See that class for what pushing the raw snapshot did.
+     *
      * @param array<string, mixed> $conflictRow
+     * @return array{outcome: string, warnings: list<string>}
      */
-    private function applyDuplicate(SyncJob $job, array $conflictRow, string $resolution): void
+    private function applyDuplicate(SyncJob $job, array $conflictRow, string $resolution): array
     {
         $info = json_decode((string) $conflictRow['duplicate_json'], true);
         $roles = is_array($info) ? self::rolesForDuplicate($info) : null;
@@ -108,6 +131,7 @@ class ConflictApplier
             throw new \RuntimeException('Corrupt duplicate_json on conflict row.');
         }
         [$sourceRole, $destRole] = $roles;
+        $conflictId = (int) $conflictRow['id'];
 
         $uid = (string) $conflictRow['uid'];
         $sourceSnapshot = $conflictRow["{$sourceRole}_snapshot"];
@@ -130,45 +154,108 @@ class ConflictApplier
                 $this->cancelDuplicate($job, $destUid, $destRole, (string) $destSnapshot, $destHref);
             }
 
-            $this->state->resolveConflict((int) $conflictRow['id'], $resolution);
-            return;
+            $this->state->resolveConflict($conflictId, $resolution);
+            return ['outcome' => self::APPLIED, 'warnings' => []];
         }
 
+        $source = $this->sideForRole($job, $sourceRole);
         $dest = $this->sideForRole($job, $destRole);
 
-        if ($resolution === self::ARCHIVE) {
-            if ($destSnapshot === null) {
-                throw new \RuntimeException('Cannot archive: the existing copy has no recorded content.');
-            }
-            $this->archiveContactToFile($job, (string) $destSnapshot);
+        // The new contact, as it is now.
+        $sourceHref = $info['source_href'] ?? null;
+        $live = is_string($sourceHref) && $sourceHref !== '' ? self::readLive($source, $sourceHref, $uid) : null;
+        if ($live === null) {
+            $this->state->resolveConflict($conflictId, self::OBSOLETE);
+            return ['outcome' => self::OBSOLETE, 'warnings' => []];
         }
+        [$sourceText, $sourceContact] = $live;
+
+        // The existing copy, as it is now -- needed by every choice except
+        // "keep both", which leaves it alone.
+        $destHref = $info['dest_href'] ?? null;
+        $destUid = $info['dest_uid'] ?? null;
+        $destLive = null;
+        if ($resolution !== $destRole) {
+            $destLive = is_string($destHref) && $destHref !== '' && is_string($destUid) && $destUid !== ''
+                ? self::readLive($dest, $destHref, $destUid)
+                : null;
+            if ($destLive === null) {
+                // Gone or replaced: there is nothing to merge into any more,
+                // and the next run plans the new contact as an ordinary
+                // create (or raises a fresh conflict if it matches another).
+                $this->state->resolveConflict($conflictId, self::OBSOLETE);
+                return ['outcome' => self::OBSOLETE, 'warnings' => []];
+            }
+        }
+
+        if ($resolution === self::ARCHIVE) {
+            $this->archiveContactToFile($job, $destLive[0]);
+        }
+
+        $warnings = [];
+        $categories = $dest->groupStrategy() === 'categories' && is_array($info['categories'] ?? null)
+            ? array_values(array_map('strval', $info['categories']))
+            : null;
+        $text = DestinationRenderer::render(
+            $source,
+            $sourceText,
+            $job->includePhotos,
+            $categories,
+            static function (string $why) use (&$warnings, $uid): void {
+                $warnings[] = "contact {$uid}: failed to fetch referenced photo, written without it: {$why}";
+            },
+        );
 
         if ($resolution === $destRole) {
             // Keep both: create the new contact under its own fresh href,
             // leaving the existing copy untouched and untracked.
             $href = $dest->hrefFor($uid);
-            [$newEtag, $storedText] = $dest->putVCard($href, (string) $sourceSnapshot, null);
+            [$newEtag, $storedText] = $dest->putVCard($href, $text, null);
         } else {
-            $destHref = $info['dest_href'] ?? null;
-            if (!is_string($destHref) || $destHref === '') {
-                throw new \RuntimeException('Cannot resolve: the matched existing copy has no recorded href.');
-            }
-            [$newEtag, $storedText] = $dest->putVCard($destHref, (string) $sourceSnapshot, $dest->etagFor($destHref));
-            $href = $destHref;
+            // Guarded by the ETag of the read just made, so a change in
+            // between is refused rather than overwritten.
+            [$newEtag, $storedText] = $dest->putVCard((string) $destHref, $text, $destLive[2]);
+            $href = (string) $destHref;
         }
 
-        $parsed = Model::parse((string) $sourceSnapshot);
         $this->state->upsertContact($job->id, $uid, [
             "{$destRole}_href" => $href,
             "{$destRole}_etag" => $newEtag,
             "{$destRole}_hash" => Model::textHash($storedText),
-            "{$destRole}_rev" => $parsed->rev,
-            "{$sourceRole}_href" => $info['source_href'] ?? null,
-            "{$sourceRole}_hash" => Model::contactContentHash($parsed),
-            "{$sourceRole}_rev" => $parsed->rev,
+            "{$destRole}_rev" => $sourceContact->rev,
+            "{$sourceRole}_href" => $sourceHref,
+            "{$sourceRole}_hash" => Model::contactContentHash($sourceContact),
+            "{$sourceRole}_rev" => $sourceContact->rev,
         ]);
 
-        $this->state->resolveConflict((int) $conflictRow['id'], $resolution);
+        $this->state->resolveConflict($conflictId, $resolution);
+        return ['outcome' => self::APPLIED, 'warnings' => $warnings];
+    }
+
+    /**
+     * A contact's current text and parse, or null when $href no longer
+     * holds the contact $uid -- deleted, or replaced by another.
+     *
+     * @return array{0: string, 1: Contact, 2: string}|null text, parse, ETag
+     */
+    private static function readLive(SyncSide $side, string $href, string $uid): ?array
+    {
+        $etag = $side->owns($href) ? $side->etagFor($href) : null;
+        if ($etag === null) {
+            return null;
+        }
+
+        [$text, $getEtag] = $side->getVCard($href);
+        $etag = $getEtag ?? $etag;
+        try {
+            // $uid as the fallback: a destination card with no UID is known by
+            // the identity derived from its href, which is what $uid is.
+            $parsed = Model::parse($text, $uid);
+        } catch (\Throwable) {
+            return null;
+        }
+
+        return $parsed instanceof Contact && $parsed->uid === $uid ? [$text, $parsed, $etag] : null;
     }
 
     /**
@@ -213,7 +300,7 @@ class ConflictApplier
      */
     private function cancelDuplicate(SyncJob $job, string $uid, string $role, string $snapshot, string $href): void
     {
-        $parsed = Model::parse($snapshot);
+        $parsed = Model::parse($snapshot, $uid);
         $this->state->upsertContact($job->id, $uid, [
             "{$role}_href" => $href,
             "{$role}_hash" => Model::contactContentHash($parsed),
@@ -247,7 +334,7 @@ class ConflictApplier
      */
     private function archiveContactToFile(SyncJob $job, string $snapshot): void
     {
-        $parsed = Model::parse($snapshot);
+        $parsed = Model::parse($snapshot, 'contact');
         $base = HubFolder::safeName($parsed->fn !== '' ? $parsed->fn : $parsed->uid);
         $name = $base . '.vcf';
 

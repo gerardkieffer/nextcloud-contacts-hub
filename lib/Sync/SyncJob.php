@@ -38,6 +38,8 @@ final class SyncJob
         public readonly int $intervalSeconds,
         public readonly bool $enabled,
         public readonly ?string $lastRunAt,
+        public readonly bool $conflictPaused = false,
+        public readonly ?string $conflictPausedAt = null,
     ) {
     }
 

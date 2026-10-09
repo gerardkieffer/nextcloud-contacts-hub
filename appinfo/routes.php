@@ -44,6 +44,11 @@ return [
         ['name' => 'settings#inspect', 'url' => '/api/v1/settings/inspect', 'verb' => 'POST'],
         ['name' => 'settings#import', 'url' => '/api/v1/settings/import', 'verb' => 'POST'],
 
+        // Where conflict notifications go (personal settings), and whether
+        // Nextcloud's outgoing mail looks able to deliver them at all.
+        ['name' => 'notification#show', 'url' => '/api/v1/notifications', 'verb' => 'GET'],
+        ['name' => 'notification#update', 'url' => '/api/v1/notifications', 'verb' => 'PUT'],
+
         ['name' => 'job#index', 'url' => '/api/v1/jobs', 'verb' => 'GET'],
         ['name' => 'job#create', 'url' => '/api/v1/jobs', 'verb' => 'POST'],
         ['name' => 'job#show', 'url' => '/api/v1/jobs/{id}', 'verb' => 'GET'],

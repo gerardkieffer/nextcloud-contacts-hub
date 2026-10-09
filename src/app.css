@@ -68,3 +68,9 @@
 		overflow-x: auto;
 	}
 }
+
+/* Inline links inside note cards and prose; Nextcloud's base styles leave
+   anchors indistinguishable from the surrounding text. */
+.ch-link {
+	text-decoration: underline;
+}

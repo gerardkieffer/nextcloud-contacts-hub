@@ -82,6 +82,10 @@ final class RunnerTest extends IntegrationTestCase
     public function testPushMirrorsHubDeletionToEndpoint(): void
     {
         $this->seedHub($this->vcard('c1', 'Alice'));
+        // Not the contact under test: it keeps the book non-empty, since a
+        // run whose source reads as entirely empty is refused outright (see
+        // testAnEmptySourceIsNeverMirroredAsADeletionOfEverything).
+        $this->seedHub($this->vcard('keeper', 'Kept Throughout'));
         $job = $this->makeJob(SyncJob::TO_ENDPOINT);
         $runner = $this->runner();
         $runner->run($job, dryRun: false, force: false, triggerSource: 'manual');
@@ -90,13 +94,17 @@ final class RunnerTest extends IntegrationTestCase
         $result = $runner->run($job, dryRun: false, force: false, triggerSource: 'manual');
 
         self::assertSame(1, $result->deleted);
-        self::assertSame([], $this->transport->resources);
+        self::assertSame(['keeper'], array_keys($this->endpointByUid()));
     }
 
     public function testArchivePolicyTagsInsteadOfDeleting(): void
     {
         $this->endpoints->update($this->endpointId, self::USER_ID, ['group_strategy' => 'categories']);
         $this->seedHub($this->vcard('c2', 'Bob'));
+        // Not the contact under test: it keeps the book non-empty, since a
+        // run whose source reads as entirely empty is refused outright (see
+        // testAnEmptySourceIsNeverMirroredAsADeletionOfEverything).
+        $this->seedHub($this->vcard('keeper', 'Kept Throughout'));
         $job = $this->makeJob(SyncJob::TO_ENDPOINT, deletionPolicy: 'archive');
         $runner = $this->runner();
         $runner->run($job, dryRun: false, force: false, triggerSource: 'manual');
@@ -105,7 +113,7 @@ final class RunnerTest extends IntegrationTestCase
         $result = $runner->run($job, dryRun: false, force: false, triggerSource: 'manual');
 
         self::assertSame(1, $result->archived);
-        self::assertCount(1, $this->transport->resources);
+        self::assertCount(2, $this->transport->resources);
         self::assertStringContainsString('CATEGORIES:Deleted', $this->endpointByUid()['c2']);
 
         $again = $runner->run($job, dryRun: false, force: false, triggerSource: 'manual');
@@ -165,6 +173,8 @@ final class RunnerTest extends IntegrationTestCase
     public function testPullMirrorsEndpointDeletionIntoHub(): void
     {
         $href = $this->seedEndpoint('e1.vcf', $this->vcard('e1', 'Remote Rita'));
+        // Keeps the endpoint non-empty; see testAnEmptySourceIsNeverMirroredAsADeletionOfEverything.
+        $this->seedEndpoint('keeper.vcf', $this->vcard('keeper', 'Kept Throughout'));
         $job = $this->makeJob(SyncJob::FROM_ENDPOINT);
         $runner = $this->runner();
         $runner->run($job, dryRun: false, force: false, triggerSource: 'manual');
@@ -423,6 +433,219 @@ final class RunnerTest extends IntegrationTestCase
         self::assertCount(1, $this->transport->resources);
     }
 
+    public function testConflictCountSurvivesAPauseAndResume(): void
+    {
+        // Regression: a resumed segment used to start from a fresh
+        // RunResult(conflicts: 0) with no re-derivation, so a run that
+        // recorded a conflict during planning (segment 1) but paused before
+        // finishing reported 0 conflicts once it resumed and completed
+        // (segment 2) -- silently hiding the conflict from the persisted
+        // run row and the manual-run UI, even though it was never resolved.
+        $this->seedHub($this->personVcard('c-new', 'Alice', 'Martin', 'alice@example.com', 'HOME'));
+        $this->seedEndpoint('old-e.vcf', $this->personVcard('old-e', 'Alice', 'Martin', 'ALICE@example.com', 'WORK'));
+        for ($i = 1; $i <= 3; $i++) {
+            $this->seedHub($this->vcard("c{$i}", "Contact {$i}"));
+        }
+        $job = $this->makeJob(SyncJob::TO_ENDPOINT);
+        $runner = $this->runner();
+
+        // Deadline already in the past -- processes at most one item, then
+        // pauses. The conflict is recorded during planning, before that.
+        $first = $runner->run($job, dryRun: false, force: false, triggerSource: 'manual', timeBudgetSeconds: -1000);
+        self::assertSame('paused', $first->status);
+        self::assertSame(1, $first->conflicts);
+
+        $second = $runner->run($job, dryRun: false, force: false, triggerSource: 'manual');
+
+        self::assertSame('completed', $second->status);
+        self::assertSame(1, $second->conflicts, 'the conflict must still be reported after resuming, not reset to 0');
+    }
+
+    public function testARunThatPausedReportsWhatEverySegmentDidNotJustTheLast(): void
+    {
+        // Regression, seen on a large push that paused once: the screen, the
+        // response and the stored run row all reported only the second half
+        // of it, because a resumed segment starts from a fresh RunResult and
+        // only the last segment's tally was ever written down. The planning
+        // warnings went the same way -- raised in segment 1, absent from the
+        // stored run once segment 2 finished it.
+        for ($i = 1; $i <= 5; $i++) {
+            $this->seedHub($this->vcard("c{$i}", "Contact {$i}"));
+        }
+        $this->seedHub(
+            "BEGIN:VCARD\r\nVERSION:3.0\r\nFN:Team\r\nUID:grp\r\n"
+            . "X-ADDRESSBOOKSERVER-KIND:group\r\n"
+            . "X-ADDRESSBOOKSERVER-MEMBER:urn:uuid:c1\r\n"
+            . "X-ADDRESSBOOKSERVER-MEMBER:urn:uuid:long-gone\r\n"
+            . "END:VCARD\r\n",
+        );
+        $job = $this->makeJob(SyncJob::TO_ENDPOINT);
+        $runner = $this->runner();
+
+        // A deadline already in the past pauses after every single item, so
+        // each of the six items is its own segment.
+        $segments = 0;
+        do {
+            $result = $runner->run($job, dryRun: false, force: false, triggerSource: 'manual', timeBudgetSeconds: -1000);
+            $segments++;
+        } while ($result->status === 'paused' && $segments < 20);
+
+        self::assertSame('completed', $result->status);
+        self::assertGreaterThan(1, $segments, 'precondition: the run must really have been split');
+        self::assertSame(6, $result->created, 'five contacts and a group, across six segments, all count');
+        self::assertSame(0, $result->updated);
+        self::assertSame(1, $this->runCountFor($job->id));
+
+        $row = $this->runRowsFor($job->id)[0];
+        self::assertSame($result->created, (int) $row['created'], 'the stored row must agree with the response');
+        self::assertSame($result->updated, (int) $row['updated']);
+        self::assertStringContainsString(
+            'long-gone',
+            (string) $row['warnings_json'],
+            'a warning raised while planning must still be on the run once a later segment finishes it',
+        );
+    }
+
+    /** A card the way a server such as Mailo keeps it: no UID property at all. */
+    private function uidlessVcard(string $first, string $last, string $email, string $note = ''): string
+    {
+        $noteLine = $note !== '' ? "NOTE:{$note}\r\n" : '';
+
+        return "BEGIN:VCARD\r\nVERSION:3.0\r\nFN:{$first} {$last}\r\nN:{$last};{$first};;;\r\n"
+            . "{$noteLine}EMAIL:{$email}\r\nEND:VCARD\r\n";
+    }
+
+    public function testPushingToAServerWithoutUidsUpdatesTheMatchingCardsInsteadOfDuplicatingThem(): void
+    {
+        // Cards without a UID used to be discarded as unreadable, so every
+        // contact the hub held looked new and would have been pushed beside
+        // the card that already described the same person.
+        $this->seedHub("BEGIN:VCARD\r\nVERSION:3.0\r\nUID:c-alice\r\nFN:Alice Martin\r\nN:Martin;Alice;;;\r\nEMAIL:alice@example.com\r\nEND:VCARD\r\n");
+        $this->seedHub("BEGIN:VCARD\r\nVERSION:3.0\r\nUID:c-bob\r\nFN:Bob Weber\r\nN:Weber;Bob;;;\r\nEMAIL:bob@example.com\r\nEND:VCARD\r\n");
+        $aliceHref = $this->seedEndpoint('alice.vcf', $this->uidlessVcard('Alice', 'Martin', 'alice@example.com', 'only on the endpoint'));
+        $carolText = $this->uidlessVcard('Carol', 'Keller', 'carol@example.com');
+        $carolHref = $this->seedEndpoint('carol.vcf', $carolText);
+        $job = $this->makeJob(SyncJob::TO_ENDPOINT);
+        $runner = $this->runner();
+
+        $result = $runner->run($job, dryRun: false, force: false, triggerSource: 'manual');
+
+        self::assertSame([], $result->errors);
+        self::assertSame(0, $result->conflicts, 'a unique name-and-email match is not something to ask about');
+        self::assertCount(3, $this->transport->resources, 'Alice updated in place, Bob created, Carol untouched -- not four');
+        self::assertStringContainsString('UID:c-alice', $this->transport->resources[$aliceHref]['body'], 'the existing card now carries the hub contact');
+        self::assertSame($carolText, $this->transport->resources[$carolHref]['body'], 'a card nothing matched is left exactly as it was');
+        self::assertSame(1, $result->updated);
+        self::assertSame(1, $result->created);
+
+        $again = $runner->run($job, dryRun: false, force: false, triggerSource: 'manual');
+        self::assertTrue($again->plan->isEmpty(), 'and it settles: the next run has nothing to do');
+        self::assertCount(3, $this->transport->resources);
+    }
+
+    public function testAServerWhoseFullAnswerOmitsUidsStillMatchesContactsByTheirRealUid(): void
+    {
+        // The Mailo shape: the cards have UIDs, but the whole-collection
+        // answer drops them. The hub's contact and the endpoint's card are the
+        // same contact by UID, and two cards for the same name sit beside it.
+        // Seen without the UID this was a conflict (two candidates by name);
+        // seen with it, it is a plain update of the one card that matches.
+        $this->seedHub("BEGIN:VCARD\r\nVERSION:3.0\r\nUID:shared-uid\r\nFN:Alice Martin\r\nN:Martin;Alice;;;\r\nEMAIL:alice@example.com\r\nEND:VCARD\r\n");
+        $mine = $this->seedEndpoint('mine.vcf', "BEGIN:VCARD\r\nVERSION:3.0\r\nUID:shared-uid\r\nFN:Alice Martin\r\nN:Martin;Alice;;;\r\nNOTE:old\r\nEMAIL:alice@example.com\r\nEND:VCARD\r\n");
+        $other = $this->seedEndpoint('other.vcf', "BEGIN:VCARD\r\nVERSION:3.0\r\nUID:another-uid\r\nFN:Alice Martin\r\nN:Martin;Alice;;;\r\nEMAIL:alice@example.com\r\nEND:VCARD\r\n");
+        $otherBefore = $this->transport->resources[$other]['body'];
+        $this->transport->reportOmitsUid = true;
+        $job = $this->makeJob(SyncJob::TO_ENDPOINT);
+        $runner = $this->runner();
+
+        $result = $runner->run($job, dryRun: false, force: false, triggerSource: 'manual');
+
+        self::assertSame([], $result->errors);
+        self::assertSame(0, $result->conflicts);
+        self::assertCount(2, $this->transport->resources);
+        self::assertStringNotContainsString('NOTE:old', $this->transport->resources[$mine]['body'], 'the card with the same UID was updated in place');
+        self::assertSame($otherBefore, $this->transport->resources[$other]['body'], 'its namesake was not touched');
+
+        $again = $runner->run($job, dryRun: false, force: false, triggerSource: 'manual');
+        self::assertTrue($again->plan->isEmpty());
+    }
+
+    public function testACopyThatDiffersOnlyInTheModificationDateIsLinkedWithoutBeingWritten(): void
+    {
+        // A copy already on the server that differs from the hub's in the
+        // last-modified date and nothing else: adopting it as an update would
+        // write a card only to change that date, on a server with no snapshot.
+        $this->seedHub("BEGIN:VCARD\r\nVERSION:3.0\r\nUID:c-same\r\nFN:Alice Martin\r\nN:Martin;Alice;;;\r\nEMAIL:alice@example.com\r\nREV:2026-01-01T00:00:00Z\r\nEND:VCARD\r\n");
+        $this->seedHub("BEGIN:VCARD\r\nVERSION:3.0\r\nUID:c-diff\r\nFN:Bob Weber\r\nN:Weber;Bob;;;\r\nEMAIL:bob@example.com\r\nREV:2026-01-01T00:00:00Z\r\nEND:VCARD\r\n");
+        $same = $this->seedEndpoint('same.vcf', "BEGIN:VCARD\r\nVERSION:3.0\r\nUID:c-same\r\nFN:Alice Martin\r\nN:Martin;Alice;;;\r\nEMAIL:alice@example.com\r\nREV:2025-06-06T06:06:06Z\r\nEND:VCARD\r\n");
+        $diff = $this->seedEndpoint('diff.vcf', "BEGIN:VCARD\r\nVERSION:3.0\r\nUID:c-diff\r\nFN:Bob Weber\r\nN:Weber;Bob;;;\r\nEMAIL:bob@example.com\r\nNOTE:only here\r\nREV:2025-06-06T06:06:06Z\r\nEND:VCARD\r\n");
+        $sameEtag = $this->transport->resources[$same]['etag'];
+        $diffEtag = $this->transport->resources[$diff]['etag'];
+        $job = $this->makeJob(SyncJob::TO_ENDPOINT);
+        $runner = $this->runner();
+
+        $preview = $runner->run($job, dryRun: true, force: false, triggerSource: 'manual');
+        self::assertSame(1, $preview->updated, 'the preview counts only what a run would write');
+        self::assertSame($sameEtag, $this->transport->resources[$same]['etag']);
+
+        $result = $runner->run($job, dryRun: false, force: false, triggerSource: 'manual');
+
+        self::assertSame([], $result->errors);
+        self::assertSame(1, $result->updated, 'only the card whose content differs is written');
+        self::assertSame($sameEtag, $this->transport->resources[$same]['etag'], 'the identical card was not touched');
+        self::assertNotSame($diffEtag, $this->transport->resources[$diff]['etag'], 'the differing one was');
+        self::assertArrayHasKey('c-same', $this->state->allContacts($job->id), 'but it is recorded as synced');
+
+        $again = $runner->run($job, dryRun: false, force: false, triggerSource: 'manual');
+        self::assertTrue($again->plan->isEmpty(), 'and the pair settles');
+
+        // The link is a real one: an edit on the hub now reaches the card.
+        $this->seedHub("BEGIN:VCARD\r\nVERSION:3.0\r\nUID:c-same\r\nFN:Alice Martin\r\nN:Martin;Alice;;;\r\nEMAIL:alice@example.com\r\nNOTE:edited\r\nREV:2026-02-02T00:00:00Z\r\nEND:VCARD\r\n");
+        $edited = $runner->run($job, dryRun: false, force: false, triggerSource: 'manual');
+        self::assertSame(1, $edited->updated);
+        self::assertStringContainsString('NOTE:edited', $this->transport->resources[$same]['body']);
+    }
+
+    public function testAnAmbiguousMatchOnAServerWithoutUidsIsAConflictAndWritesNothing(): void
+    {
+        $this->seedHub("BEGIN:VCARD\r\nVERSION:3.0\r\nUID:c-alice\r\nFN:Alice Martin\r\nN:Martin;Alice;;;\r\nEMAIL:alice@example.com\r\nEND:VCARD\r\n");
+        $first = $this->seedEndpoint('a1.vcf', $this->uidlessVcard('Alice', 'Martin', 'alice@example.com'));
+        $second = $this->seedEndpoint('a2.vcf', $this->uidlessVcard('Alice', 'Martin', 'alice@example.com'));
+        $before = [$this->transport->resources[$first]['body'], $this->transport->resources[$second]['body']];
+        $job = $this->makeJob(SyncJob::TO_ENDPOINT);
+
+        $result = $this->runner()->run($job, dryRun: false, force: false, triggerSource: 'manual');
+
+        self::assertSame(1, $result->conflicts, 'two candidates: a person decides, the app does not guess');
+        self::assertSame($before, [$this->transport->resources[$first]['body'], $this->transport->resources[$second]['body']]);
+        self::assertCount(2, $this->transport->resources);
+    }
+
+    public function testPullingFromAServerWithoutUidsGivesTheHubCopyAUidAndSettles(): void
+    {
+        $text = $this->uidlessVcard('Dora', 'Schmit', 'dora@example.com');
+        $href = $this->seedEndpoint('dora.vcf', $text);
+        // Keeps the endpoint non-empty on the second pass; see
+        // testAnEmptySourceIsNeverMirroredAsADeletionOfEverything.
+        $this->seedEndpoint('keeper.vcf', $this->uidlessVcard('Kept', 'Throughout', 'kept@example.com'));
+        $job = $this->makeJob(SyncJob::FROM_ENDPOINT);
+        $runner = $this->runner();
+
+        $result = $runner->run($job, dryRun: false, force: false, triggerSource: 'manual');
+
+        self::assertSame([], $result->errors);
+        self::assertSame(2, $result->created);
+        $uid = Model::derivedUid($href);
+        $stored = $this->hubGet($uid);
+        self::assertNotNull($stored, 'the hub holds the contact under the identity derived from its href');
+        self::assertStringContainsString("UID:{$uid}", $stored);
+        self::assertSame($text, $this->transport->resources[$href]['body'], 'the source card is never touched');
+
+        $again = $runner->run($job, dryRun: false, force: false, triggerSource: 'manual');
+        self::assertTrue($again->plan->isEmpty(), 'the same card is recognised on the next run, not created a second time');
+        self::assertCount(2, $this->hubByUid());
+    }
+
     public function testTwoArchivalsInOneRunShareTheArchiveGroup(): void
     {
         // Regression: archiveContact used to read the archive group's state
@@ -431,6 +654,10 @@ final class RunnerTest extends IntegrationTestCase
         // it from scratch with only its own uid as a member.
         $this->seedHub($this->vcard('g1', 'Alice'));
         $this->seedHub($this->vcard('g2', 'Bob'));
+        // Not the contact under test: it keeps the book non-empty, since a
+        // run whose source reads as entirely empty is refused outright (see
+        // testAnEmptySourceIsNeverMirroredAsADeletionOfEverything).
+        $this->seedHub($this->vcard('keeper', 'Kept Throughout'));
         $job = $this->makeJob(SyncJob::TO_ENDPOINT, deletionPolicy: 'archive');
         $runner = $this->runner();
         $runner->run($job, dryRun: false, force: false, triggerSource: 'manual');
@@ -468,6 +695,10 @@ final class RunnerTest extends IntegrationTestCase
         $this->seedHub($this->vcard('a1', 'Alice'));
         $this->seedHub($this->vcard('a2', 'Bob'));
         $this->seedHub($this->vcard('a3', 'Carol'));
+        // Not the contact under test: it keeps the book non-empty, since a
+        // run whose source reads as entirely empty is refused outright (see
+        // testAnEmptySourceIsNeverMirroredAsADeletionOfEverything).
+        $this->seedHub($this->vcard('keeper', 'Kept Throughout'));
         $job = $this->makeJob(SyncJob::TO_ENDPOINT, deletionPolicy: 'archive');
         $runner = $this->runner();
         $runner->run($job, dryRun: false, force: false, triggerSource: 'manual');
@@ -821,6 +1052,10 @@ final class RunnerTest extends IntegrationTestCase
         // from.
         $this->endpoints->update($this->endpointId, self::USER_ID, ['group_strategy' => 'categories']);
         $this->seedHub($this->vcard('c9', 'Carol'));
+        // Not the contact under test: it keeps the book non-empty, since a
+        // run whose source reads as entirely empty is refused outright (see
+        // testAnEmptySourceIsNeverMirroredAsADeletionOfEverything).
+        $this->seedHub($this->vcard('keeper', 'Kept Throughout'));
         $job = $this->makeJob(SyncJob::TO_ENDPOINT, deletionPolicy: 'archive');
         $runner = $this->runner();
         $runner->run($job, dryRun: false, force: false, triggerSource: 'manual');

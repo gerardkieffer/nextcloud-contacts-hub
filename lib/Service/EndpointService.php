@@ -8,6 +8,7 @@ use OCA\ContactHub\CapabilityTest\Tester;
 use OCA\ContactHub\CardDav\DavException;
 use OCA\ContactHub\CardDav\DavTimeout;
 use OCA\ContactHub\Db\EndpointMapper;
+use OCA\ContactHub\Db\JobMapper;
 use OCA\ContactHub\Presets\Registry;
 use OCA\ContactHub\Sync\ClientFactory;
 use OCA\ContactHub\Sync\Endpoint;
@@ -25,6 +26,8 @@ class EndpointService
     public function __construct(
         private readonly EndpointMapper $mapper,
         private readonly ClientFactory $clientFactory,
+        private readonly JobMapper $jobs,
+        private readonly SyncStateReset $reset,
     ) {
     }
 
@@ -62,7 +65,55 @@ class EndpointService
             $this->verifyCredentials($this->candidate($data, $existing));
         }
 
-        $this->mapper->update($id, $userId, $data);
+        // Another server or another account is another set of address books.
+        // The stored collection is an absolute URL on the old one, and kept,
+        // it went on receiving every request -- under the new credentials.
+        // Clearing it makes the endpoint ask for a capability test again,
+        // which is the only thing that can say which collection is meant now.
+        $serverMoved = (isset($data['base_url']) && $data['base_url'] !== $existing->baseUrl)
+            || (isset($data['username']) && $data['username'] !== $existing->username);
+        if ($serverMoved && !array_key_exists('collection_href', $data)) {
+            $data['collection_href'] = null;
+        }
+
+        $this->writeRetargeting(
+            $existing,
+            $userId,
+            array_key_exists('collection_href', $data) ? $data['collection_href'] : $existing->collectionHref,
+            $serverMoved ? 'base_url' : 'collection_href',
+            fn() => $this->mapper->update($id, $userId, $data),
+        );
+    }
+
+    /**
+     * Perform $write, and if it moves the endpoint off the collection it had,
+     * reset the sync state of every job using it -- see SyncStateReset.
+     *
+     * Only a move *away* from a collection counts. Choosing one for an
+     * endpoint that had none is how every endpoint starts out, and no job
+     * can have synced anything against no collection.
+     */
+    private function writeRetargeting(
+        Endpoint $existing,
+        string $userId,
+        ?string $newCollectionHref,
+        string $field,
+        callable $write,
+    ): void {
+        if ($existing->collectionHref === null || $newCollectionHref === $existing->collectionHref) {
+            $write();
+
+            return;
+        }
+
+        $this->reset->applyAndReset(
+            $this->jobs->idsForEndpoint($existing->id, $userId),
+            $userId,
+            "The endpoint \"{$existing->name}\" was moved to another collection, server or account; "
+                . 'starting over from a first run.',
+            $field,
+            $write,
+        );
     }
 
     /**
@@ -307,16 +358,23 @@ class EndpointService
     /** @param array<string, mixed> $input */
     public function applySuggestions(int $id, string $userId, array $input): void
     {
-        $this->require($id, $userId);
+        $existing = $this->require($id, $userId);
+        $collectionHref = isset($input['collection_href']) ? (string) $input['collection_href'] : null;
 
-        $this->mapper->updateCapabilities(
-            $id,
+        $this->writeRetargeting(
+            $existing,
             $userId,
-            is_array($input['capabilities'] ?? null) ? $input['capabilities'] : [],
-            isset($input['collection_href']) ? (string) $input['collection_href'] : null,
-            isset($input['group_strategy']) && in_array($input['group_strategy'], Endpoint::GROUP_STRATEGIES, true)
-                ? (string) $input['group_strategy']
-                : null,
+            $collectionHref ?? $existing->collectionHref,
+            'collection_href',
+            fn() => $this->mapper->updateCapabilities(
+                $id,
+                $userId,
+                is_array($input['capabilities'] ?? null) ? $input['capabilities'] : [],
+                $collectionHref,
+                isset($input['group_strategy']) && in_array($input['group_strategy'], Endpoint::GROUP_STRATEGIES, true)
+                    ? (string) $input['group_strategy']
+                    : null,
+            ),
         );
 
         // Discovery can resolve to a different host than the one configured

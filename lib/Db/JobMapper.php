@@ -96,6 +96,28 @@ class JobMapper extends Mapper
     }
 
     /**
+     * Ids of $userId's jobs that use $endpointId. Ids only: the caller is
+     * about to change that endpoint, and hydrating a job resolves its
+     * endpoint and address book, which is work nobody needs here.
+     *
+     * @return list<int>
+     */
+    public function idsForEndpoint(int $endpointId, string $userId): array
+    {
+        $qb = $this->db->getQueryBuilder();
+        $qb->select('id')
+            ->from(self::TABLE)
+            ->where($qb->expr()->eq('endpoint_id', $qb->createNamedParameter($endpointId)))
+            ->andWhere($qb->expr()->eq('user_id', $qb->createNamedParameter($userId)));
+
+        $result = $qb->executeQuery();
+        $ids = array_map(static fn(array $row): int => (int) $row['id'], $result->fetchAll());
+        $result->closeCursor();
+
+        return $ids;
+    }
+
+    /**
      * Every enabled job across every user, oldest run first.
      *
      * Deliberately unscoped: the background job runs as no one in particular
@@ -162,6 +184,8 @@ class JobMapper extends Mapper
             intervalSeconds: (int) $row['interval_seconds'],
             enabled: (bool) $row['enabled'],
             lastRunAt: $row['last_run_at'],
+            conflictPaused: (bool) $row['paused_for_conflicts'],
+            conflictPausedAt: $row['paused_for_conflicts_at'],
         );
     }
 
@@ -264,6 +288,25 @@ class JobMapper extends Mapper
         $qb->update(self::TABLE)
             ->set('last_run_at', $qb->createNamedParameter($this->now()))
             ->where($qb->expr()->eq('id', $qb->createNamedParameter($id)));
+        $qb->executeStatement();
+    }
+
+    /**
+     * System-managed, not part of update()'s user-settable columns: a
+     * scheduled run pauses a job here when it raises unresolved conflicts,
+     * and ConflictService clears it once a job's unresolved-conflict count
+     * reaches zero. Deliberately separate from `enabled`, which stays
+     * purely user-driven -- a disabled job and a conflict-paused job are
+     * different states with different unpause paths.
+     */
+    public function setConflictPaused(int $jobId, string $userId, bool $paused): void
+    {
+        $qb = $this->db->getQueryBuilder();
+        $qb->update(self::TABLE)
+            ->set('paused_for_conflicts', $qb->createNamedParameter($paused, \OCP\DB\QueryBuilder\IQueryBuilder::PARAM_BOOL))
+            ->set('paused_for_conflicts_at', $qb->createNamedParameter($paused ? $this->now() : null))
+            ->where($qb->expr()->eq('id', $qb->createNamedParameter($jobId)))
+            ->andWhere($qb->expr()->eq('user_id', $qb->createNamedParameter($userId)));
         $qb->executeStatement();
     }
 

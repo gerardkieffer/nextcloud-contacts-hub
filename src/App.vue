@@ -6,6 +6,7 @@ import NcAppNavigationItem from '@nextcloud/vue/components/NcAppNavigationItem'
 import NcContent from '@nextcloud/vue/components/NcContent'
 import NcLoadingIcon from '@nextcloud/vue/components/NcLoadingIcon'
 import IconAlert from 'vue-material-design-icons/AlertCircleOutline.vue'
+import IconBackupRestore from 'vue-material-design-icons/BackupRestore.vue'
 import IconServer from 'vue-material-design-icons/ServerNetwork.vue'
 import IconSync from 'vue-material-design-icons/Sync.vue'
 import IconCog from 'vue-material-design-icons/Cog.vue'
@@ -15,6 +16,7 @@ import ConflictsView from './views/ConflictsView.vue'
 import EndpointsView from './views/EndpointsView.vue'
 import JobsView from './views/JobsView.vue'
 import SettingsView from './views/SettingsView.vue'
+import SnapshotsView from './views/SnapshotsView.vue'
 import { store } from './store.js'
 
 // Hash routing rather than vue-router: three destinations, no nested routes,
@@ -71,6 +73,14 @@ onMounted(() => store.loadAll())
 					</template>
 				</NcAppNavigationItem>
 				<NcAppNavigationItem
+					:name="t('contacthub', 'Snapshots')"
+					:active="view === 'snapshots'"
+					href="#snapshots">
+					<template #icon>
+						<IconBackupRestore :size="20" />
+					</template>
+				</NcAppNavigationItem>
+				<NcAppNavigationItem
 					:name="t('contacthub', 'Export and import')"
 					:active="view === 'settings'"
 					href="#settings">
@@ -93,6 +103,7 @@ onMounted(() => store.loadAll())
 			<JobsView v-else-if="view === 'jobs'" />
 			<EndpointsView v-else-if="view === 'endpoints'" />
 			<ConflictsView v-else-if="view === 'conflicts'" />
+			<SnapshotsView v-else-if="view === 'snapshots'" />
 			<SettingsView v-else-if="view === 'settings'" />
 		</NcAppContent>
 	</NcContent>

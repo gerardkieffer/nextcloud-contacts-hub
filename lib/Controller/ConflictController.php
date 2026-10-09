@@ -51,9 +51,7 @@ class ConflictController extends ApiController
     public function resolve(int $id, string $resolution): DataResponse
     {
         return $this->respond(function () use ($id, $resolution): array {
-            $this->service->resolve($id, $this->userId(), $resolution);
-
-            return ['resolved' => $id];
+            return ['resolved' => $id] + $this->service->resolve($id, $this->userId(), $resolution);
         });
     }
 

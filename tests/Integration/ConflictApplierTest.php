@@ -60,6 +60,62 @@ final class ConflictApplierTest extends IntegrationTestCase
         self::assertCount(0, $this->state->unresolvedConflicts($job->id));
     }
 
+    /**
+     * A conflict whose existing copy has no UID: an address in common and nothing
+     * else, which is a question for a person even on a server that keeps no UIDs.
+     *
+     * @return array{0: array<string, mixed>, 1: string}
+     */
+    private function seedUidlessDuplicateConflict(SyncJob $job): array
+    {
+        $this->seedHub($this->personVcard('c1', 'Alice', 'Martin', 'shared@x.com', 'HOME', 'from the hub'));
+        $href = $this->seedEndpoint(
+            'plain.vcf',
+            "BEGIN:VCARD\r\nVERSION:3.0\r\nFN:Someone Else\r\nN:Else;Someone;;;\r\nNOTE:old endpoint copy\r\nEMAIL:shared@x.com\r\nEND:VCARD\r\n",
+        );
+
+        $this->runner()->run($job, dryRun: false, force: false, triggerSource: 'manual');
+
+        $rows = $this->state->unresolvedConflicts($job->id);
+        self::assertCount(1, $rows, 'an address alone is a conflict, not an automatic match');
+
+        return [$rows[0], $href];
+    }
+
+    public function testResolvingAConflictOverACardWithoutAUidOverwritesItInPlace(): void
+    {
+        // readLive() re-reads the existing copy and refuses to act on one that
+        // is gone or replaced. A card with no UID must still be recognisable
+        // as the one the conflict was about, or every such conflict would
+        // close itself as "obsolete" the moment someone clicked it.
+        $job = $this->makeJob(SyncJob::TO_ENDPOINT);
+        [$row, $href] = $this->seedUidlessDuplicateConflict($job);
+
+        $this->conflictApplier()->apply($job, $row, ConflictApplier::HUB);
+
+        self::assertCount(1, $this->transport->resources, 'overwritten in place, nothing new created');
+        $body = $this->transport->resources[$href]['body'];
+        self::assertSame('c1', Model::parse($body)->uid);
+        self::assertSame('from the hub', Document::parse($body)->first('NOTE')?->value);
+        self::assertCount(0, $this->state->unresolvedConflicts($job->id));
+    }
+
+    public function testKeepingBothOverACardWithoutAUidLeavesItAloneAndStaysResolved(): void
+    {
+        $job = $this->makeJob(SyncJob::TO_ENDPOINT);
+        [$row, $href] = $this->seedUidlessDuplicateConflict($job);
+        $original = $this->transport->resources[$href]['body'];
+
+        $this->conflictApplier()->apply($job, $row, ConflictApplier::ENDPOINT);
+
+        self::assertSame($original, $this->transport->resources[$href]['body']);
+        self::assertCount(2, $this->transport->resources);
+        $again = $this->runner()->run($job, dryRun: false, force: false, triggerSource: 'manual');
+        self::assertCount(0, $this->state->unresolvedConflicts($job->id), 'a decided pair is not raised again');
+        self::assertSame(2, count($this->transport->resources));
+        self::assertSame([], $again->errors);
+    }
+
     public function testDuplicateKeepBothResolutionCreatesSeparatelyAndLeavesExistingUntouched(): void
     {
         $job = $this->makeJob(SyncJob::TO_ENDPOINT);

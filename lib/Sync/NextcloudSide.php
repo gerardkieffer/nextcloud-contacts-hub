@@ -176,4 +176,16 @@ class NextcloudSide implements SyncSide
     {
         return rawurlencode($uid) . '.vcf';
     }
+
+    /** Card URIs are stored and read back verbatim, so there is only one spelling of each. */
+    public function normalizeHref(string $href): string
+    {
+        return $href;
+    }
+
+    /** A card URI is a bare name inside the book; anything with a path or a scheme came from elsewhere. */
+    public function owns(string $href): bool
+    {
+        return $href !== '' && !str_contains($href, '/');
+    }
 }

@@ -17,6 +17,15 @@ final class Plan
     public array $contactsUpdateAToB = [];
     /** @var string[] uids removed from A -> mirrored/archived on B */
     public array $contactsRemoveOnB = [];
+    /**
+     * Planned creates that are really an existing, UID-less card on B: source
+     * uid => B's uid for it (derived from its href). Runner::adoptExistingOnB()
+     * turns these into in-place updates, like a same-UID copy. Always a subset
+     * of contactsCreateAToB.
+     *
+     * @var array<string, string>
+     */
+    public array $contactsAdoptAToB = [];
     /** @var DuplicateMatch[] new untracked contacts matching an existing untracked contact on the other side */
     public array $contactDuplicates = [];
     /** @var string[] uids of a declined duplicate pair whose contact is gone, so the cancelled row can be dropped */
@@ -39,6 +48,15 @@ final class Plan
     public array $groupsUpdateAToB = [];
     /** @var string[] */
     public array $groupsRemoveOnB = [];
+    /**
+     * Groups about to be created on B whose name collides with an existing,
+     * untracked group already there -- reported as a warning, not a
+     * conflict; there is no per-group resolution workflow. Each entry is
+     * [sourceUid, destUid, name].
+     *
+     * @var array<int, array{0: string, 1: string, 2: string}>
+     */
+    public array $groupNameCollisions = [];
 
     public function isEmpty(): bool
     {

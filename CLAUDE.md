@@ -30,19 +30,8 @@ that describes what it did.
 
 ### History
 
-It began as a Python CLI (`python-baseline` branch), became a standalone PHP
-app with its own address book storage, auth, router and photo store
-(`php-rewrite` branch), and is now a Nextcloud app. All active work happens
-on **`main`**. The other two branches are historical baselines; don't merge
-between them unless asked.
-
-That branch was called `nextcloud-app` until 2026-09-11, while `main` still
-pointed at the Python baseline's single commit. Renaming cost nothing --
-that commit is an ancestor of this branch anyway, so it was a label, not a
-line of development -- and it stopped `main` meaning "the oldest thing here"
-in a repository where every other tool assumes it means "the current thing".
-Older commit messages and notes still say `nextcloud-app`; they mean this
-branch.
+It began as a Python CLI, became a standalone PHP app with its own address
+book storage, auth, router and photo store, and is now a Nextcloud app.
 
 The migration deleted ~2,600 lines that existed only because there was no
 platform underneath: `Auth/`, `Http/`, `View/`, `Support/`, `Hub/`, the
@@ -63,7 +52,7 @@ npm exists only to build the frontend, and its output is committed.
 ```
 appinfo/
   info.xml            app metadata, background job, navigation
-  routes.php          SPA shell + 28 OCS actions
+  routes.php          SPA shell + the OCS actions
 lib/
   AppInfo/Application.php    IBootstrap; the three registrations that
                              cannot be autowired
@@ -72,21 +61,31 @@ lib/
   Files/              HubFolder: the "Contacts Hub" folder in a user's own
                       files, where snapshots and settings exports live
   Service/            validation and orchestration
-                      AddressBookService  the ONLY doorway to CardDavBackend
-                                          besides NextcloudSide
+                      AddressBookService  access checks for address books;
+                                          CardDavBackend is otherwise only
+                                          touched by NextcloudSide,
+                                          SideFactory and BackupService
                       EndpointService     CRUD + the capability-test flow
                       JobService, RunService, ConflictService, BackupPresenter
+                      SyncStateReset      forgets a job's sync state when
+                                          what it syncs is moved elsewhere
                       SettingsTransfer    export/import of endpoints and jobs
+                      NotificationPreferences, NotificationService
+                                          who gets the conflict-pause email
   Db/                 hand-written mappers over IQueryBuilder (not QBMapper
                       -- see gotchas). Every query filters by user_id.
-  Migration/          one IMigrationStep; portable across MySQL/PG/SQLite
-  BackgroundJob/      SyncTimedJob
+  Migration/          IMigrationSteps, portable across MySQL/PG/SQLite; some
+                      only repair data (see the cron gotcha)
+  BackgroundJob/      SyncTimedJob, SendConflictPauseNotification
+  Settings/           Personal + PersonalSection: the "Contacts Hub"
+                      entry in Personal settings (notification address)
   Listener/           UserDeletedListener
   Sync/               the engine: Planner (diff), Runner (execute,
                       resumable), SideMap, SideFactory, NextcloudSide,
                       RemoteSide, CategoryGroups, ConflictApplier,
-                      Archiver, DuplicateMatcher, JobValidator, JobLock,
-                      BackupService, EndpointBackup
+                      Archiver, DuplicateMatcher, Normalize, JobValidator,
+                      JobLock, DestinationRenderer, BackupService,
+                      EndpointBackup (unreachable: no route uses it)
   VCard/              hand-rolled RFC 6350: LineCodec (fold/unfold),
                       PropertyLine, Document, Model (parse), Transform
   CardDav/            Client (discovery + CRUD), DavXml, AbstractTransport,
@@ -94,26 +93,26 @@ lib/
   Presets/            Preset + Registry (icloud/infomaniak/mailo/google/generic)
   CapabilityTest/     Tester (discover / writeProbe / mkcolProbe)
 src/                  Vue 3 SPA (App, views/, components/, api.js, store.js)
+                      plus settings.js, a second entry for Personal settings
 js/                   BUILT output; committed, because Nextcloud installs
                       apps as plain files with no build step on the server
-templates/main.php    SPA mount point
+templates/main.php    SPA mount point; settings-personal.php likewise
+img/                  app-dark.svg, the Personal settings section icon
 tests/                unit (no DB, no Nextcloud) + Integration/ (both)
 dev/                  docker-compose.yml and the php/npm/occ/lint/
                       phpunit-integration wrappers
-docs/                 install.md, presets.md, server-capabilities.md, timeouts.md
+docs/                 install.md, presets.md, groups.md, server-capabilities.md,
+                      timeouts.md
 ```
 
 ## Running things
 
-Nothing is installed on the host, deliberately, even though a given dev
-machine may well have Node and PHP available locally (an Apple Silicon
-Homebrew ships PHP as a bottle; Intel Homebrew no longer bottles it and
-compiles from source instead, an hour or more). This project is developed
-from more than one Mac -- Intel and Apple Silicon -- and whichever binaries
-Homebrew happens to have on a given machine can drift in version between
-them. Docker keeps the toolchain identical everywhere: same PHP 8.3, same
-Node 22, same MariaDB, regardless of which machine or architecture is
-running it. Everything runs in containers instead:
+Nothing is installed on the host, deliberately. Docker keeps the toolchain
+identical on every machine and architecture: same PHP, same Node 22, same
+MariaDB. "Same PHP" means two versions, though: `./dev/php` and the unit
+suite run PHP 8.3 (the minimum `info.xml` declares), while the Nextcloud
+container, and so the integration suite, runs whatever its image ships --
+8.5 at the time of writing. Everything runs in containers instead:
 
 ```bash
 cd dev && docker compose up -d     # throwaway Nextcloud 34 on :8080
@@ -144,13 +143,13 @@ edits are live. `docker compose down -v` throws the instance away.
 
 Two suites, and the split is deliberate.
 
-**Unit (`phpunit.xml`, ~145 tests)** needs no database and no Nextcloud, and
+**Unit (`phpunit.xml`, ~190 tests)** needs no database and no Nextcloud, and
 runs in well under a second. It covers the vCard layer, the Planner,
 SideMap, CategoryGroups, presets, conflict resolution, duplicate matching
 and the CardDAV client against a fake transport. Keep new logic testable
 here where you can; it is the loop you will actually run.
 
-**Integration (`phpunit.integration.xml`, ~82 tests)** boots Nextcloud
+**Integration (`phpunit.integration.xml`, ~170 tests)** boots Nextcloud
 itself (`require lib/base.php`, as occ does) because the official Docker
 image ships no `tests/` directory, so the server's `\Test\TestCase` does not
 exist. It drives the real Runner, mappers and `CardDavBackend`, with the
@@ -251,6 +250,16 @@ without one. There is no unconditional-overwrite PUT. A caller meaning
 "overwrite whatever is there" must fetch the live etag first. `NextcloudSide`
 enforces the same semantics against Nextcloud's etag.
 
+Note what that does and does not promise for a Runner *create*. The push
+passes the live ETag of its target href whenever the listing has one, so a
+planned create whose href already exists overwrites it (guarded by that
+ETag) rather than failing. That is deliberate -- a same-UID copy is the same
+contact -- and `Runner::adoptExistingOnB()` extends it to a same-UID copy at
+a *different* href, which used to fail on every run (an imported `.vcf`
+names its files at random, and Nextcloud refuses a second card with one
+UID). `If-None-Match: *` only guards against something appearing between
+the listing and the PUT.
+
 ### CategoryGroups: the archive category is not a group
 
 Nextcloud models groups as `CATEGORIES`, so `NextcloudSide` reports the
@@ -258,6 +267,10 @@ Nextcloud models groups as `CATEGORIES`, so `NextcloudSide` reports the
 objects for passthrough endpoints. Derived UIDs are UUIDv5 of the normalised
 name, so they are stable across runs without a mapping table. Renaming a
 category therefore reads as delete-plus-create on the far side.
+
+Archiving into a categories side *adds* the archive category
+(`Archiver::writeArchiveTaggedContact()`); it used to replace the contact's
+categories with it, so an archived contact silently left all its groups.
 
 `project()` takes an ignore list and `Runner` passes the job's archive
 category. Without it, projecting the archive category would manufacture a
@@ -318,6 +331,33 @@ Guzzle exposes no typed timeout, so `NextcloudHttpTransport::looksLikeTimeout()`
 reads the exception message chain for curl's error 28. Misreading it in
 either direction is expensive; `TimeoutDetectionTest` pins both.
 
+### Endpoint hrefs have one spelling, and some UIDs cannot be file names
+
+The Planner decides whether B still has a contact by looking its stored href
+up in the live listing, as a string. Equivalent spellings -- `@` or `%40`, a
+space raw or as `%20`, `:443` or no port -- read as "missing", and a missing
+contact is re-created on every run and refused with a 412 every time.
+`CardDav\Href::canonical()` is the one spelling: `Client` canonicalises
+every href it hands out, `RemoteSide::hrefFor()` builds canonical ones, and
+`Runner::plannerStates()` canonicalises *stored* hrefs on load, which is
+what heals state written by older versions. `SyncSide::normalizeHref()` is
+identity on the Nextcloud side, whose URIs are read back verbatim.
+
+`hrefFor()` used to be `"{$uid}.vcf"` with nothing escaped, so `#`, `?`, `/`
+and `../` produced URLs naming some other resource -- `../` one outside the
+collection. Escaping fixes most of that, but not all: **Apache refuses an
+encoded slash (`%2F`) with a 404** before the DAV server sees the request
+(verified against Nextcloud's own endpoint, and it is Apache's default). So a
+UID with a slash, a backslash or a control character, or one over 200 bytes,
+gets a stable derived name (`uid-<sha1>.vcf`) instead. The UID is in the
+vCard; the file name never had to be it. Verified against the real server
+for `x/y`, `a#b?c`, `../escape`, `a b@c`, `100%:(x)`, `a+b,c;d` and non-ASCII:
+one card each, in the collection, recognised in the listing.
+
+`FakeHttpTransport::$listDecodedHrefs` makes the fake spell its listings
+differently from what was written, the way real servers may. It decodes only
+what decodes without changing meaning; decoding `%2F` would be another path.
+
 ### Runner backups happen between planning and the first write
 
 And only when the plan has work. Planning writes bookkeeping only, so
@@ -325,6 +365,26 @@ nothing restorable has changed yet. The empty-plan skip matters: most
 scheduled runs find nothing to do, and a half-hourly cron over 30 days would
 otherwise bury the useful restore points under ~1400 identical files.
 Resumed runs never snapshot.
+
+Which makes "the plan has work" load-bearing: a plan that is never empty
+snapshots on every run. Pull jobs from a group-vCard endpoint did exactly
+that, because every group was re-planned as a create each time (see the
+categories-destination gotcha below).
+
+The snapshot is always of the **Nextcloud** address book. On a pull that is
+the destination, so a bad run is restorable. On a push it is the source,
+which the run never writes, and the endpoint it *does* write gets no
+snapshot at all. That is why the empty-source refusal below exists, and why
+the README says so plainly rather than promising every run is undoable.
+
+Restoring a snapshot under a **pull** job used to be half undone: the next
+run re-created the contacts the restore had deleted (the out-of-band check
+sees them missing) but left the ones it had reverted reverted (a normal run
+never compares destination content). `BackupService::restore()` now reports
+the card URIs it touched, and `BackupPresenter` forgets the source hash of
+those contacts for every pull job on that book, so the rule is one: what the
+endpoint still has, it wins; what it no longer has stays restored. For a
+push job a restore is just an edit of its source, and needs nothing.
 
 ### Resumable runs execute from persisted rows, never live memory
 
@@ -342,12 +402,46 @@ must see the group the first just created. Regression:
 
 `Sync/DuplicateMatcher` hooks into the Planner's create branches only: a new
 *untracked* contact matching an *untracked* one on the other side becomes a
-conflict with `duplicate_json` set. Three things to know: one-way jobs fully
-fetch side B (the matcher needs its N/EMAIL/TEL) but B's uids stay out of
-the diff; no state is seeded at detection time, so every run re-detects a
-pending duplicate and `recordDuplicateConflict()`'s dedup swallows it;
-contacts already in `contact_state` are excluded as candidates, so a
-near-copy of an already-synced contact just syncs across.
+conflict with `duplicate_json` set. The rule: an exact shared email alone,
+or a matching name (structured N, else FN) plus a shared phone or email. A
+same-UID copy is never a candidate -- it is the same contact, see "Every PUT
+is conditional".
+
+"Email alone" excludes addresses that do not belong to one person:
+`DuplicateMatcher::sharedEmails()` collects those carried by two or more
+contacts *within* either book (counted per book, because a synced contact is
+in both). Without that, a household's address or a company's `info@` made
+every new contact behind it a duplicate of the first one synced -- and a
+conflict pauses the job's scheduled runs, so a false match is expensive.
+
+Things to know: one-way jobs fully fetch side B (the matcher needs its
+N/EMAIL/TEL) but B's uids stay out of the diff; no state is seeded at
+detection time, so every run re-detects a pending duplicate, and
+`recordDuplicateConflict()` *refreshes* the open row's snapshots rather than
+keeping the first sighting; contacts already in `contact_state` are excluded
+as candidates, so a near-copy of an already-synced contact just syncs
+across.
+
+A conflict can stop standing on its own -- most often the user deletes the
+duplicate they just made. Two things close such rows as `obsolete`, and both
+are needed:
+
+1. **Every full plan** (`StateMapper::closeConflictsNotIn()`, called from
+   `materializeNewRun`) closes open conflicts it did not re-detect, and lifts
+   a conflict pause left with nothing to wait for. This also closes the
+   unresolvable same-UID rows the removed two-way mode left behind.
+2. **`ConflictApplier` re-reads both contacts live** and closes the row
+   instead of acting when either is gone or replaced. A paused job does not
+   run, so (1) alone cannot help a user clicking on a stale row.
+
+Acting on snapshots was the bug: "merge" on a conflict whose new contact had
+been deleted overwrote the existing copy with it, and the next run mirrored
+the deletion -- removing a contact that had only ever lived on the
+destination. What resolution writes goes through `DestinationRenderer`, the
+same pipeline as a run; pushing the raw snapshot ignored the photo setting,
+left iCloud photo URLs unresolved and dropped categories, permanently.
+`duplicate_json.categories` carries what a run would fold in, because
+resolution has no address book in hand to derive it from.
 
 ### Why the vCard parser was not replaced with sabre/vobject
 
@@ -458,6 +552,16 @@ development without one: a private window, a different browser, or bump
 Recognise it by the symptom: the new string is in `js/` and in the
 container, and absent from the page.
 
+Two traps in checking it, both met while testing the Snapshots screen. A
+hard reload does not help either -- the module import stays cached. And
+navigating to the *same* URL with only a different `#fragment` is not a
+reload at all, so it can look as if a version bump failed when the page
+simply never asked the server again; reload the document itself.
+
+`SnapshotsView` restores against whatever book is selected, so never test it
+on a book holding data you care about. Create a throwaway book for the test
+and delete it after.
+
 ### Anything a user should keep goes in their Files, not IAppData
 
 `Files\HubFolder` owns the "Contacts Hub" folder in each user's home:
@@ -511,6 +615,10 @@ for a full-collection PROPFIND each, which batch resolution turned from a
 curiosity into minutes against a server like Mailo. `Client::etagFor()`
 treats only 404/410 as "not there" -- reading any other failure as absence
 would turn the next write into a create.
+
+Resolution now also GETs the existing copy to act on live content, and
+guards its PUT with the ETag of that GET rather than looking it up a second
+time. Still one targeted lookup per conflict; `ConflictApplierTest` pins it.
 
 ### Everything a run reports must also reach the Nextcloud log
 
@@ -611,8 +719,10 @@ and they have to be fixed together or each one hides the other.
    failures to a user who saw an empty screen. It is imported in
    `src/main.js` now; `createAppConfig`'s `inlineCSS` folds it into the
    bundle, so there is no extra file to ship. Check it survived a build with
-   `grep -c _toastContainer js/contacthub-main.mjs` -- 2 means the rule is in
-   there, 1 means only the class reference is and the import is gone.
+   `grep -c _toastContainer js/*.mjs` -- one file reporting 2 means the rule
+   is in there, 1 means only the class reference is and the import is gone.
+   Since the settings page became a second entry, that file is the shared
+   `*.chunk.mjs`, not `contacthub-main.mjs`.
 
 2. **Every action goes through `ApiController::respond()`.** It used to map
    only `ValidationException` and `NotFoundException`, and
@@ -677,6 +787,123 @@ the batched form of `findOpenRun()` and has to keep agreeing with it exactly
 -- same dry-run and status filter, same newest-first tie-break -- or the
 screen reopens a run the resume path does not recognise. Pinned by asserting
 both against each other rather than against literals.
+
+### A resumed run starts from nothing, so its tally has to be written down
+
+`Runner::runLocked()` builds a fresh `RunResult` for every segment of a run
+that pauses on its time budget. Only the totals and the live conflict count
+were restored, so `created`/`updated`/`deleted`/`archived` and the warnings
+covered the *last* segment alone -- in the response, in `finishRun()`'s stored
+row, and so in the history. Found on a large push that paused once: the
+screen reported only what the second half created, and the run row said the
+same. The data was right; only the report was wrong, which is why nothing
+failed.
+
+The counters now ride along on the per-item `updateRunProgress()` UPDATE, the
+warnings and errors are written as JSON (`saveRunReport()`) once after planning
+and again whenever an item adds one, and a resumed segment reads all of it back
+before it starts. Pinned by
+`RunnerTest::testARunThatPausedReportsWhatEverySegmentDidNotJustTheLast`, which
+splits a run into one segment per item.
+
+The same family on the screen: `JobsView` renders one `RunPanel`, so clicking
+Sync on a second job reused the first job's component, and its result, warnings
+and failure card stayed under the new job's heading. It is keyed by job id.
+
+Note what a *preview* counts, because it differs from the run: into a
+categories destination (every pull into Nextcloud) groups are not resources, so
+neither the preview nor the run counts them -- a pull of 242 contacts and 12
+groups reports 242.
+
+### A card with no UID is a card, not an error -- and check it really has none
+
+UID is optional in vCard (RFC 6350 section 6.7.6), but `Model::parse()` threw
+"vCard has no UID" for a card without one, so such a card was discarded:
+invisible to the Planner and the duplicate detector, and one warning per card
+on every run, each a log line and a note card, none saying which card was
+meant.
+
+**Mailo's contacts did have UIDs.** Its whole-collection `addressbook-query`
+REPORT leaves UID out of every contact (groups keep theirs); GET and
+`addressbook-multiget` return it. That was diagnosed wrongly at first -- as a
+server that keeps no UIDs -- and a fuzzy-matching feature was built before
+anyone fetched one card with GET. Many of the hub's contacts shared a UID with
+a Mailo card already; the missing UID is what made each of them a conflict.
+`Client::completeCards()` now re-fetches any card the REPORT delivered without
+a UID by multiget. A well-behaved server never triggers it. Pinned by
+`ClientTest` and `RunnerTest::testAServerWhoseFullAnswerOmitsUidsStillMatches...`,
+with `FakeHttpTransport::$reportOmitsUid`. **Before assuming a server has no
+identity for a card, ask it for that card with GET.**
+
+For a card that really has none, three rules:
+
+1. **Identity comes from where the server keeps the card.**
+   `Model::derivedUid($href)` is a UUIDv5 of the canonical href, passed to
+   `parse()` as a fallback and flagged `uidDerived` on the result. It is never
+   written into a card on its own side. State rows already record the endpoint
+   href, so once a card is linked its identity survives edits to name, email
+   and phone -- which matching on those could not. `buildAddressBook()` takes
+   the hrefs for this, and so does `Runner::hrefMap()`; the two must derive
+   alike.
+2. **A source card that has no UID leaves with one.** `pushContactOne()` and
+   `pushGroupOne()` add the derived UID to the copy they write, or the next
+   run would read it back as a different contact. Pulling from a UID-less
+   server therefore gives the hub card `UID:<derived>`; the endpoint's card is
+   never touched.
+3. **One fuzzy match is trusted without asking, and only that one.**
+   `DuplicateMatcher::findIdentityMatches()` is rule two of `findMatches()` --
+   the same name *and* a shared email or phone, never an address alone --
+   restricted to destination cards with no UID. `Planner::identityMatches()`
+   accepts a match only when it is one to one: a contact matching two such
+   cards, or two contacts matching one, is left to the ordinary duplicate
+   conflict. A match is planned as a create and carried in
+   `Plan::$contactsAdoptAToB`; `adoptExistingOnB()` then turns it into an
+   in-place update, the same path a same-UID copy has always taken. Cards that
+   have a UID of their own still go through a conflict, as before -- the
+   manual-by-design rule below is about them. The matched card is
+   **overwritten** by the hub's version, so anything the server added that the
+   hub does not carry is gone from it; there is no endpoint snapshot.
+
+`buildAddressBook()` also aggregates what it still cannot read into one warning
+per reason with a count, instead of one per card.
+
+**A same-UID copy is never a duplicate of its namesakes.** The Planner used to
+run duplicate detection on every untracked hub contact, excluding only the
+contact's own UID from the candidates, so a contact already on the endpoint
+under its own UID was still flagged if *another* card there shared its name and
+address. On a book holding many namesakes that was a conflict for every one of
+them. When B holds the contact's UID it is the same contact, and
+the create is adopted in place like any same-UID copy.
+
+### A copy that differs only in its modification date is linked, not written
+
+Adopting a copy that is already on the server as an in-place update writes a
+card only to change its date when nothing else differs, on a server no
+snapshot covers. `Runner::identicalOnB()` compares what a run *would write*
+(the source card rendered for the destination) with B's card, ignoring `REV`
+and line endings
+(`Model::contentHashIgnoringRev()`), and links the equal ones with both sides'
+hashes and no write. The preview counts only what a run would write.
+
+It did not fire on any Mailo contact when tried, and that is the instructive
+part: Mailo rewrites what it stores -- it drops `PRODID`, rewrites the type
+labels on `TEL`/`EMAIL`/`ADR`, re-encodes photos and adds its own `X-EA-GROUPS`
+-- so a card it holds is never equal to the one that was sent, `REV` or not.
+Comparing by meaning (field values, ignoring parameters and `X-` fields) would
+catch those; it was left alone deliberately, because it is a fuzzier rule and
+would hide label differences on first link.
+
+Deliberately narrow: destinations that keep groups as cards only, never a card
+whose photo is a URL (rendering that needs a fetch), never a card that had no
+UID of its own (writing the UID is the point). Anything it cannot decide is an
+ordinary update.
+
+**It is for first sight only.** Every stored hash is `Model::textHash()` over
+the raw text, `REV` included. Ignoring `REV` in the ordinary change check would
+change what every stored hash means, and every tracked contact would look
+edited at once -- all three jobs pushing their whole book. A real edit moves
+`REV` together with the content anyway. If REV-only changes ever need ignoring
+there, it needs a second stored hash and a migration.
 
 ### A short fetch is indistinguishable from a smaller address book
 
@@ -781,6 +1008,151 @@ quietly, because a group bug shows up as *absence* -- a group that is not
 there looks like a group nobody made. When adding a reconciliation to one,
 check whether the other wants it.
 
+### Conflict notifications: no stored preference means "on, to the profile"
+
+A scheduled run that leaves unresolved conflicts pauses its job
+(`paused_for_conflicts`, separate from the user-owned `enabled`) and queues
+`SendConflictPauseNotification`, a one-shot `QueuedJob`. SMTP has no timeout
+this app controls, so sending inline from the cron tick would let one slow
+mail server stall every other due job; see that class's docblock.
+
+Where the mail goes is `NotificationPreferences`, stored per user in
+`IUserConfig` (`notify_mode`, `notify_email`), edited in Personal settings →
+Contacts Hub. The rules that make "on by default as soon as the profile has
+an address" true:
+
+* **Absence of a row is the profile mode.** Nothing is written on first
+  read. A user who adds an address to their profile later starts getting
+  mail without revisiting this app. Writing a default row would quietly
+  turn that into a snapshot of whatever the profile said at the time.
+* **An unrecognised stored mode falls back to profile, not off.** Silently
+  dropping notifications is the worse failure.
+* **A custom address is validated whenever it is non-empty**, not only
+  while selected, and is kept when the user switches to off. Otherwise a
+  stored-but-invalid address would become the recipient the moment someone
+  picked "custom" again.
+* **Opted out is silent; opted in with no usable address logs a warning.**
+  That user expects mail and is not getting it.
+
+`NotificationService::mailStatus()` is a guess, because `IMailer` has no
+"is mail configured" query. It mirrors core's `EmailTestSuccessful` setup
+check exactly: an empty `core.emailTestSuccessful` counts as configured when
+`mail_domain` is set, because mail configured through occ never runs the
+admin test. Then it is kept honest with `last_mail_failure_at`, which a real
+send sets and the next successful send clears.
+
+### Two bundles share a chunk, so the package ships all of `js/`
+
+The Personal settings form is a second Vite entry (`src/settings.js` →
+`js/contacthub-settings.mjs`). With two entries, Rollup moves everything
+they share (most of `@nextcloud/vue`) into a hashed `*.chunk.mjs` that both
+import at runtime. `./dev/package` used to copy exactly
+`js/contacthub-main.mjs`, so the first package built after the split would
+have installed cleanly and then failed to load both pages. It copies every
+`js/*.mjs` and its `.license` now. The chunk's name changes with its
+content, and Vite empties `js/` on each build, so no stale chunks pile up.
+
+### CardDavBackend enforces no permissions, so this app has to
+
+Nextcloud checks share permissions in the DAV layer *above*
+`CardDavBackend`; the backend writes to any book id it is handed. Everything
+here goes straight to the backend, so `AddressBookService` makes the checks
+DAV would have made:
+
+* **Read-only shares.** `requireAccess()` accepted anything in the user's
+  book list, and a read-only share is in that list, so a pull job wrote
+  into -- and mirror-deleted from -- another user's address book. Verified
+  with a real share. `requireWritable()` reads `{owncloud}read-only`, and
+  everything that writes to a book uses it: job validation, every run
+  (`SideFactory`), snapshot restore.
+* **Ownership** comes from `{owncloud}owner-principal`. Nextcloud rewrites
+  `principaluri` to the sharee for a shared book, so comparing that called
+  every shared book "owned".
+* **Access is re-checked on every run**, in `SideFactory::forJob()`, which
+  every run, preview and conflict resolution goes through. Checked only at
+  save time, a revoked share kept syncing, and a **deleted** book read as an
+  empty one: `getCards()` on a dead id just returns nothing, and a push job
+  mirrored that by deleting everything on the endpoint. Verified. The refusal
+  is `HubUnavailable`, recorded as a failed run so it reaches the history and
+  not only the log.
+
+### A source that reads as empty is refused, not mirrored
+
+`Runner::emptySourceRefusal()`: a plan whose side A has **no contacts at
+all** but would remove tracked contacts from B throws before anything is
+recorded (a preview warns instead). A book that empties all at once has
+been deleted, unshared, swapped or answered for by a misbehaving server far
+more often than really emptied, and on a push nothing snapshots the
+destination. Deliberately narrow -- empty only, no percentage threshold,
+since partial deletions are ordinary and a threshold would be a guess. The
+price is that deleting the last contact of a book does not propagate; the
+message says what to do. Tests that delete a book's only contact need a
+second "keeper" contact for this reason.
+
+### Sync state is bound to a location, so moving a job resets it
+
+State rows record where each contact lives; endpoint hrefs are absolute
+URLs. Kept across a move -- a job to another book or endpoint, an endpoint
+to another collection, server or account -- they steered the next run's
+writes and deletions at the *old* location, carrying the *new* endpoint's
+credentials to the old server. Verified.
+
+`Service\SyncStateReset` applies such a change and resets the affected
+jobs under their job locks (refusing the save while one is mid-run): open
+runs closed, conflicts closed as obsolete, contact and group state dropped,
+conflict pause lifted. The next run is a first run, which deletes nothing
+and adopts same-UID copies. A **direction** change is not a move: both
+locations stay valid, and role-named state exists precisely to survive it.
+
+`EndpointService::update()` also clears `collection_href` when the server
+or username changes, forcing a new capability test. Defence in depth for
+state written before any of this: `SyncSide::owns()` says whether an href is
+a location on that side, `Runner` treats a foreign one as "no copy here",
+and `RemoteSide` refuses any put/get/delete/PROPFIND outside its collection.
+Photo fetches are exempt on purpose -- iCloud serves them from another host,
+authenticated with these same credentials.
+
+### A categories destination has no group resources, and that changes three things
+
+When B keeps groups as CATEGORIES (every pull into Nextcloud),
+`PlanInput::$bGroupsAsCategories` is set and:
+
+1. **Group state is still recorded**, with no `b_href`.
+   `Runner::pushGroupOne()` used to return without writing a row, so every
+   group was planned as a create on every run, every run had work, and
+   every run took a snapshot.
+2. **The out-of-band check is skipped** for groups -- a group there never
+   has a resource, so "missing" would re-plan all of them forever -- and so
+   is the name-collision warning, which compared against B's projected
+   categories and fired on every run.
+3. **A group change on A re-pushes its members.** Adding someone to a group
+   on iCloud edits only the group vCard, so the contact never re-synced and
+   the category never reached Nextcloud. `Planner::planCategoryMembership()`
+   re-pushes members old and new, but only those whose live categories on B
+   differ from what A implies, which keeps a first sighting free.
+
+### Derived groups are recognised by their UID, because they have no href
+
+A group projected from Nextcloud categories has no resource on A, so its
+`a_href` is null, and "gone from A" (`aHadIt`) never fired: a removed or
+renamed category left its group on the endpoint for ever, beside the new
+one. `Planner::isDerivedCategoryGroup()` recognises the row by its UID being
+`uidFor()` of the stored name. Not "any row with a `b_href`": after a
+direction flip, rows for the endpoint's *own* groups have one too, and that
+test would delete them.
+
+### Migrations cannot type-hint a schema class
+
+`ISchemaWrapper::createTable()`/`getTable()` return Doctrine's `Table` on
+Nextcloud 34 and an `OC\DB\Schema\Table` wrapper (implementing a new
+`OCP\DB\Schema\ITable`) on 35, and 34 has no `ITable` at all. So a helper
+that takes a table names neither class and takes `object`. The one that named
+Doctrine's made the app impossible to install on 35: the first migration threw
+a `TypeError`, and nothing short of a fresh install on 35 shows it, because an
+instance upgraded from 34 has already run its migrations. A new major is only
+"supported" after a fresh install, an upgrade from the previous major, and the
+integration suite on both.
+
 ### Syntax traps that cost real time
 
 * **XML comments may not contain `--`.** The house style of using `--` as an
@@ -811,6 +1183,10 @@ check whether the other wants it.
 * **Category renames read as delete-plus-create** on passthrough endpoints,
   because the derived UID changes. Preserving identity would need a mapping
   table.
+* **Endpoints are never backed up.** `Sync\EndpointBackup` is left over from
+  the standalone app and no route reaches it. Taking a pre-push snapshot of
+  the endpoint, and a way to restore it, is a feature to design, not a
+  route to add: flag before starting.
 * **Mailo's preset is user-reported**, not verified against a live account by
   this project (unlike iCloud and Infomaniak). Don't upgrade that framing
   without someone actually testing it.
@@ -822,63 +1198,20 @@ check whether the other wants it.
   concluding it was forgotten. Adding OAuth is a real project: client
   registration, the authorisation-code flow, refresh-token storage next to the
   encrypted password, and a Bearer path in the transport. Flag before starting.
-* **Endpoint backup/restore and address book snapshots are synchronous and
-  one-shot**, not chunked like sync runs. Fine for the address books this
+* **Address book snapshots are synchronous and one-shot**, not chunked like sync runs. Fine for the address books this
   targets; a very large one over a slow connection could hit an execution
   ceiling. Flag before adding chunking.
-* **No admin settings UI.** Two values are read from `IAppConfig` with
+* **No admin settings UI.** Three values are read from `IAppConfig` with
   sensible defaults and no way to change them but `occ config:app:set`:
-  `http_timeout_seconds` (30) and `backup_retention_days` (30).
+  `http_timeout_seconds` (30), `backup_retention_days` (30) and
+  `web_time_budget_seconds` (20, clamped to 5-120).
 * **Not published to the app store yet.** That needs signing, screenshots and
   a decision about `CardDavBackend` being an internal DAV-app class. Its use
-  is confined to `AddressBookService` and `NextcloudSide`, so the blast
-  radius of a future change is two files.
+  is confined to `AddressBookService`, `NextcloudSide`, `SideFactory` and
+  `BackupService`, so the blast radius of a future change is four files.
 
 ## Git hygiene
 
 * Commit messages go long and explain *why*, including bugs found and how
-  they were caught. This has been genuinely useful for reconstructing
+  they were caught. That has been genuinely useful for reconstructing
   context across sessions -- keep it.
-* Don't rebase or rewrite `main`; a human follows it commit by commit.
-* `python-baseline` (Python CLI) and `php-rewrite` (standalone PHP) are
-  historical. Leave them alone.
-* `main` itself still has no remote and is never pushed anywhere -- it stays
-  the private, full-detail development history.
-* **Publishing to GitHub changed on 2026-09-13.** Before that date, every
-  publish was a fresh orphan commit force-pushed over the last one, sharing
-  no history with this repo at all. From 0.1.14 on, the public repo at
-  github.com/gerardkieffer/nextcloud-contacts-hub gets *real*, ordinary
-  commits with real history -- no more squashing, no more force-push, one
-  new commit per publish. That real history starts at the 0.1.14 snapshot
-  (`Contacts Hub 0.1.14`), which is the last thing force-pushed under the
-  old scheme; nothing before it was carried over, by the user's explicit
-  choice, so the public repo's history is shorter than this one's and that
-  gap is permanent, not a bug.
-* The local branch `github-main` tracks `origin/main` and is the only thing
-  ever pushed. It does not share `main`'s commit objects -- to publish a
-  change, replay it onto `github-main` as an ordinary commit (`git
-  cherry-pick`, or a hand-written commit if a private commit bundles
-  something that shouldn't cross over) and `git push origin github-main:main`
-  as a normal fast-forward.
-* **The personal-data sweep must check commit metadata, not just file
-  contents.** The very first real-history push (the amended 0.1.14 root)
-  went out with the author *and* committer set to `gerard@mailo.com` --
-  every earlier squash-publish had used the same real address without it
-  ever mattering, because `git commit --amend`/cherry-pick both inherit the
-  original commit's author unless told otherwise, and this repo's local
-  `user.email` is the real one (`main` never leaves the machine, so it was
-  never a problem there). Caught only by reading `git show -s --format='%ae
-  %ce'` on the commit about to be pushed, not by grepping the diff -- a
-  content-only sweep passes this every time. Before every push to
-  `github-main`, check both: the diff (emails outside the
-  example.com/placeholder set, `/Users/`+`kDrive` paths in `js/` and
-  `package-lock.json`, `config/`/`data/`/`backup/`/`node_modules/`/`tools/`/
-  `dist/`/`.claude/` absent from the tree) *and* every commit's author/
-  committer. Set identity explicitly when committing on `github-main`
-  (`GIT_AUTHOR_EMAIL`/`GIT_COMMITTER_EMAIL=gerard.kieffer@ikmail.com`, or
-  `git commit --amend --author`) rather than trusting the repo-wide
-  `user.email` -- `main` and `github-main` share one `.git/config` and Git
-  has no per-branch identity.
-* `data/` and `config/local.php` in the working tree are leftovers from the
-  standalone app and hold real credentials and real user data. They are
-  gitignored. Never commit them, and never delete `data/` while cleaning up.

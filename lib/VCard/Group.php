@@ -13,6 +13,7 @@ final class Group
         public readonly array $memberUids,
         public readonly string $rawText,
         public readonly ?string $rev = null,
+        public readonly bool $uidDerived = false,
     ) {
     }
 }

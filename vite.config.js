@@ -4,6 +4,7 @@ import { join, resolve } from 'node:path'
 // createAppConfig emits to js/ with the app id prefixed, so the entry named
 // 'main' below becomes js/contacthub-main.mjs -- which is what
 // PageController::index passes to Util::addScript('contacthub', 'contacthub-main').
+// Likewise 'settings' becomes js/contacthub-settings.mjs for Settings\Personal.
 //
 // The built bundle IS committed: Nextcloud installs apps as plain files with no
 // build step on the server, so js/ has to be in the repository and in the
@@ -11,6 +12,7 @@ import { join, resolve } from 'node:path'
 const appConfig = createAppConfig(
 	{
 		main: resolve(join('src', 'main.js')),
+		settings: resolve(join('src', 'settings.js')),
 	},
 	{
 		// Keeps component CSS next to its chunk instead of one global stylesheet,

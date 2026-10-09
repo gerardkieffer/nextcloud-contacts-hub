@@ -10,8 +10,22 @@ management](https://docs.nextcloud.com/server/stable/admin_manual/apps_managemen
 
 ## Requirements
 
-- Nextcloud **34** exactly. `appinfo/info.xml` declares
-  `min-version="34" max-version="34"`, and that gate is enforced at install.
+- Nextcloud **34 or 35**. `appinfo/info.xml` declares
+  `min-version="34" max-version="35"`, and that gate is enforced at install
+  and again on every Nextcloud upgrade.
+
+  Nextcloud has no separate "tested up to" marker, so `max-version` is the
+  newest major this app has actually been tested on. On a newer major,
+  Nextcloud disables the app during the upgrade. You can still turn it back on
+  at your own risk with
+
+  ```bash
+  php occ app:enable --force contacthub
+  ```
+
+  Nextcloud remembers that choice (in `app_install_overwrite`) only until the
+  next major upgrade, so each untested major is something you opt into once,
+  deliberately.
 - PHP 8.3 or newer.
 
 ## 1. Build the package

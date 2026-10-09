@@ -44,7 +44,7 @@ final class DavXmlTest extends TestCase
                 <D:propstat>
                   <D:prop>
                     <D:resourcetype><D:collection/><card:addressbook/></D:resourcetype>
-                    <D:displayname>GK Contacts</D:displayname>
+                    <D:displayname>Personal Contacts</D:displayname>
                     <D:current-user-privilege-set>
                       <D:privilege><D:write/></D:privilege>
                       <D:privilege><D:read/></D:privilege>
@@ -76,7 +76,7 @@ final class DavXmlTest extends TestCase
         self::assertCount(2, $responses);
 
         $writable = $responses[0];
-        self::assertSame('GK Contacts', $writable->text('displayname'));
+        self::assertSame('Personal Contacts', $writable->text('displayname'));
         self::assertTrue($writable->hasChild('resourcetype', 'addressbook'));
         self::assertTrue($writable->hasChild('current-user-privilege-set', 'write'));
         self::assertTrue($writable->hasChild('supported-report-set', 'sync-collection'));

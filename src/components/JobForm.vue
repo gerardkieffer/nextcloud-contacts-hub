@@ -39,7 +39,10 @@ const directions = [
  */
 const bookOptions = computed(() => store.addressBooks.map((b) => ({
 	id: b.id,
-	label: `${b.displayName} (#${b.id})`,
+	// Said up front, since a pull job into a read-only book is refused on save.
+	label: b.readOnly
+		? `${b.displayName} (#${b.id}) — ${t('contacthub', 'read-only')}`
+		: `${b.displayName} (#${b.id})`,
 })))
 
 const endpointOptions = computed(() => store.endpoints.map((e) => ({
@@ -145,14 +148,14 @@ async function save() {
 			{{ d.label }}
 		</NcCheckboxRadioSwitch>
 
-		<label class="ch-label">{{ t('contacthub', 'When a contact is deleted on one side') }}</label>
+		<label class="ch-label">{{ t('contacthub', 'When a contact is deleted from the source') }}</label>
 		<NcCheckboxRadioSwitch
 			:model-value="form.deletion_policy"
 			value="mirror"
 			name="deletion_policy"
 			type="radio"
 			@update:model-value="form.deletion_policy = $event">
-			{{ t('contacthub', 'Delete it on the other side too') }}
+			{{ t('contacthub', 'Delete it from the destination too') }}
 		</NcCheckboxRadioSwitch>
 		<NcCheckboxRadioSwitch
 			:model-value="form.deletion_policy"
@@ -160,7 +163,7 @@ async function save() {
 			name="deletion_policy"
 			type="radio"
 			@update:model-value="form.deletion_policy = $event">
-			{{ t('contacthub', 'Keep it, tagged as archived') }}
+			{{ t('contacthub', 'Keep it on the destination, tagged as archived') }}
 		</NcCheckboxRadioSwitch>
 
 		<NcTextField

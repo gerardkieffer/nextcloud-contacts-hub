@@ -174,12 +174,13 @@ final class Client
         DavXml::assertOk($resp, "list resources in {$collectionHref}");
 
         $out = [];
-        $collectionPath = rtrim($collectionHref, '/');
+        // Canonical, like every href this client hands out -- see Href.
+        $collectionPath = rtrim(Href::canonical($collectionHref), '/');
         foreach (DavXml::parseMultistatus($resp->body) as $r) {
             if ($r->href === null) {
                 continue;
             }
-            $href = AbstractTransport::resolveUrl($collectionHref, $r->href);
+            $href = Href::canonical(AbstractTransport::resolveUrl($collectionHref, $r->href));
             if (rtrim($href, '/') === $collectionPath) {
                 continue;
             }
@@ -273,7 +274,55 @@ final class Client
         }
         DavXml::assertOk($resp, 'addressbook-query REPORT');
 
-        return $this->collectAddressData($collectionHref, $resp->body);
+        return $this->completeCards($collectionHref, $this->collectAddressData($collectionHref, $resp->body));
+    }
+
+    /**
+     * Cards the whole-collection answer delivered without a UID, fetched again
+     * with addressbook-multiget, which returns the complete card.
+     *
+     * Mailo's addressbook-query leaves UID out of every contact -- GET and
+     * multiget return it, and so does the query for the groups -- so every
+     * contact looked like a card with no identity at all, though each had
+     * one. Contacts the hub already shared with the server by UID were
+     * reported as conflicts because the UID that proves it was never seen.
+     *
+     * A card still without a UID after this really has none, and is left for
+     * Model::derivedUid(). Nothing is refetched from a server whose answer was
+     * complete, so this costs a well-behaved server nothing.
+     *
+     * @param list<array{href: string, vcard: string}> $pairs
+     * @return list<array{href: string, vcard: string}>
+     */
+    private function completeCards(string $collectionHref, array $pairs): array
+    {
+        // A fold continuation starts with whitespace, so a line that starts
+        // with UID is the property and nothing else.
+        $hasUid = static fn(string $vcard): bool => preg_match('/^UID[;:]/mi', $vcard) === 1;
+
+        $incomplete = [];
+        foreach ($pairs as $i => $pair) {
+            if (!$hasUid($pair['vcard'])) {
+                $incomplete[$i] = $pair['href'];
+            }
+        }
+        if ($incomplete === []) {
+            return $pairs;
+        }
+
+        $complete = [];
+        foreach (array_chunk(array_values($incomplete), self::MULTIGET_CHUNK) as $chunk) {
+            foreach ($this->multigetVCards($collectionHref, $chunk) as $full) {
+                $complete[$full['href']] = $full['vcard'];
+            }
+        }
+        foreach ($incomplete as $i => $href) {
+            if (isset($complete[$href]) && $hasUid($complete[$href])) {
+                $pairs[$i]['vcard'] = $complete[$href];
+            }
+        }
+
+        return $pairs;
     }
 
     /**
@@ -334,7 +383,7 @@ final class Client
             if ($r->href === null || $vcard === null || $vcard === '') {
                 continue;
             }
-            $out[] = ['href' => AbstractTransport::resolveUrl($collectionHref, $r->href), 'vcard' => $vcard];
+            $out[] = ['href' => Href::canonical(AbstractTransport::resolveUrl($collectionHref, $r->href)), 'vcard' => $vcard];
         }
         return $out;
     }

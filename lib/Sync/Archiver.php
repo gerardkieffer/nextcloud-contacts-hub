@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace OCA\ContactHub\Sync;
 
+use OCA\ContactHub\VCard\Contact;
+use OCA\ContactHub\VCard\Model;
 use OCA\ContactHub\VCard\Transform;
 
 /**
@@ -17,12 +19,18 @@ final class Archiver
 {
     /**
      * Tag $vcardText as archived per $side's group strategy and write it
-     * to $href. For 'categories' sides this folds the archive category
-     * into the vCard itself; for any other strategy the vCard is written
+     * to $href. For 'categories' sides this adds the archive category to
+     * the vCard's own; for any other strategy the vCard is written
      * unchanged (archival there is expressed via group membership -- see
      * addToArchiveGroup). Returns the new ETag and the exact text
      * stored, so callers can record a hash of what is now actually
      * there.
+     *
+     * *Adds*, not replaces. It used to replace CATEGORIES with the archive
+     * category alone, so a contact archived into Nextcloud silently left
+     * every group it was in -- the opposite of what "keep it, tagged as
+     * archived" says. On a group-vCard side archiving never touched the
+     * contact's groups either, so this also makes the two strategies agree.
      *
      * @return array{0: ?string, 1: string} new ETag, stored vCard text
      */
@@ -34,10 +42,24 @@ final class Archiver
         ?string $existingEtag,
     ): array {
         $text = $side->groupStrategy() === 'categories'
-            ? Transform::setCategories($vcardText, [$archiveGroupName])
+            ? self::withCategoryAdded($vcardText, $archiveGroupName)
             : $vcardText;
 
         return $side->putVCard($href, $text, $existingEtag);
+    }
+
+    /** $vcardText with $category among its CATEGORIES, compared case-insensitively. */
+    private static function withCategoryAdded(string $vcardText, string $category): string
+    {
+        $parsed = Model::parse($vcardText);
+        $existing = $parsed instanceof Contact ? $parsed->categories : [];
+        foreach ($existing as $name) {
+            if (Normalize::name($name) === Normalize::name($category)) {
+                return $vcardText;
+            }
+        }
+
+        return Transform::setCategories($vcardText, [...$existing, $category]);
     }
 
     /**

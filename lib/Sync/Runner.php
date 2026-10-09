@@ -139,6 +139,39 @@ class Runner
     }
 
     /**
+     * Warn, once and aggregated, about groups this run is about to create on
+     * B whose name collides with an existing, untracked group already
+     * there.
+     *
+     * Not a conflict: there is no per-group resolution workflow (unlike
+     * DuplicateMatcher for contacts), so the push proceeds -- this only
+     * makes an otherwise-invisible near-duplicate visible in the run report,
+     * the same way the dangling-members warning in Model::buildAddressBook()
+     * does. One line for the whole run, not one per group -- see CLAUDE.md
+     * on bounded warnings.
+     */
+    private function reportGroupNameCollisions(RunResult $result, SyncJob $job, SyncSide $sideB): void
+    {
+        $collisions = $result->plan->groupNameCollisions;
+        if ($collisions === []) {
+            return;
+        }
+
+        $names = array_map(static fn(array $c): string => $c[2], $collisions);
+        $count = count($names);
+
+        $this->warn($result, $job, sprintf(
+            '%d group%s about to be created in %s share a name with a group already there: %s. '
+                . 'They are likely the same group under two different identities; this app has no '
+                . 'automatic way to merge them, so both will exist side by side unless merged by hand.',
+            $count,
+            $count === 1 ? '' : 's',
+            $sideB->label(),
+            Model::truncatedList($names, 5),
+        ));
+    }
+
+    /**
      * Refuse to diff against a partly-read address book.
      *
      * Every fetch path can come back short without saying so.
@@ -190,6 +223,223 @@ class Runner
         ));
     }
 
+    /**
+     * Turn planned creates into updates of a copy B already holds under the
+     * same UID.
+     *
+     * A create writes to hrefFor($uid). When B already has that UID
+     * somewhere else -- the usual case after importing a .vcf into Nextcloud
+     * and only then setting up the pull job, since an import names its files
+     * at random -- Nextcloud refuses a second card with that UID, and the
+     * contact failed with one error per run, for ever. It was never a
+     * duplicate conflict either, because a same-UID copy is excluded from
+     * matching. Verified. A remote server that does not refuse ends up with
+     * two cards of one UID, which is worse.
+     *
+     * The same UID is the same contact, so this job's source wins, as it
+     * would for any other contact it tracks. The copy at the identical href
+     * was already taken over this way implicitly (the push sends its live
+     * ETag); this makes the other case behave the same.
+     *
+     * @param array<string, string> $hrefsB uid => href of everything read from B
+     * @return array<string, string> "contact:<uid>" / "group:<uid>" => adopted href
+     */
+    private static function adoptExistingOnB(Plan $plan, array $hrefsB, SyncSide $sideB): array
+    {
+        $adopted = [];
+
+        $creates = [];
+        foreach ($plan->contactsCreateAToB as $uid) {
+            // Its own uid on B, or -- Planner::identityMatches() -- the
+            // derived uid of a UID-less card there that is this contact.
+            $href = $hrefsB[$uid] ?? (isset($plan->contactsAdoptAToB[$uid]) ? ($hrefsB[$plan->contactsAdoptAToB[$uid]] ?? null) : null);
+            if ($href !== null) {
+                $adopted["contact:{$uid}"] = $href;
+                $plan->contactsUpdateAToB[] = $uid;
+            } else {
+                $creates[] = $uid;
+            }
+        }
+        $plan->contactsCreateAToB = $creates;
+
+        // Groups only where B holds them as resources: a categories side
+        // never gets a group written, so there is nothing to adopt.
+        if ($sideB->groupStrategy() === 'passthrough') {
+            $creates = [];
+            foreach ($plan->groupsCreateAToB as $uid) {
+                if (isset($hrefsB[$uid])) {
+                    $adopted["group:{$uid}"] = $hrefsB[$uid];
+                    $plan->groupsUpdateAToB[] = $uid;
+                } else {
+                    $creates[] = $uid;
+                }
+            }
+            $plan->groupsCreateAToB = $creates;
+        }
+
+        return $adopted;
+    }
+
+    /**
+     * Adopted contacts whose copy on B already says what the hub's would,
+     * apart from the modification date. Those need no write at all: they are
+     * taken out of the update bucket and returned (source uid => B uid) so the
+     * caller can record them as synced.
+     *
+     * The comparison is between what a run would *write* -- the source card
+     * rendered for the destination -- and B's card, ignoring REV, so a photo
+     * setting or a category that would change the card counts as a
+     * difference. Deliberately narrow: only destinations that keep groups as
+     * cards (a categories side folds membership into the card, which is
+     * derived elsewhere), and never a card whose photo is a URL, since
+     * rendering that means a network fetch. Anything it cannot decide is an
+     * ordinary update, which is always safe.
+     *
+     * @param array<string, string> $adopted keys "contact:<uid>" -- from adoptExistingOnB()
+     * @return array<string, string>
+     */
+    private static function identicalOnB(Plan $plan, array $adopted, AddressBook $bookA, AddressBook $bookB, SyncJob $job, SyncSide $sideB): array
+    {
+        if ($sideB->groupStrategy() === 'categories') {
+            return [];
+        }
+
+        $identical = [];
+        foreach ($adopted as $key => $href) {
+            [$kind, $uid] = explode(':', $key, 2);
+            $contactA = $kind === 'contact' ? ($bookA->contacts[$uid] ?? null) : null;
+            $contactB = $kind === 'contact' ? ($bookB->contacts[$plan->contactsAdoptAToB[$uid] ?? $uid] ?? null) : null;
+            // A card that had no UID of its own is never identical: writing
+            // the hub's UID into it is the point.
+            if ($contactA === null || $contactB === null || $contactB->uidDerived) {
+                continue;
+            }
+            if (self::hasPhotoReference($contactA->rawText)) {
+                continue;
+            }
+
+            $wouldWrite = Transform::renderForDestination($contactA->rawText, $job->includePhotos, null);
+            $theirs = Model::contentHashIgnoringRev($contactB->rawText);
+            if ($theirs !== null && Model::contentHashIgnoringRev($wouldWrite) === $theirs) {
+                $identical[$uid] = $contactB->uid;
+            }
+        }
+
+        $plan->contactsUpdateAToB = array_values(array_diff($plan->contactsUpdateAToB, array_keys($identical)));
+
+        return $identical;
+    }
+
+    /** A PHOTO that points somewhere instead of carrying the image. */
+    private static function hasPhotoReference(string $vcardText): bool
+    {
+        try {
+            foreach (Document::parse($vcardText)->all('PHOTO') as $photo) {
+                if (strcasecmp((string) $photo->param('VALUE'), 'uri') === 0 || preg_match('~^https?:~i', trim($photo->value)) === 1) {
+                    return true;
+                }
+            }
+        } catch (\Throwable) {
+            return true;
+        }
+
+        return false;
+    }
+
+    private function reportIdentical(RunResult $result, SyncJob $job, int $count, SyncSide $sideB): void
+    {
+        if ($count === 0) {
+            return;
+        }
+        $this->warn($result, $job, sprintf(
+            '%d contact%s in %s %s already identical to the hub\'s apart from the modification date and %s linked without being written.',
+            $count,
+            $count === 1 ? '' : 's',
+            $sideB->label(),
+            $count === 1 ? 'was' : 'were',
+            $count === 1 ? 'was' : 'were',
+        ));
+    }
+
+    /**
+     * Two lines at most for the lot -- see CLAUDE.md on bounded warnings.
+     *
+     * @param array<string, string> $adopted
+     * @param int $matched how many of those were found by name and a shared
+     *        phone or email rather than by UID
+     * @param int $identical how many need no write at all; see identicalOnB()
+     */
+    private function reportAdoptions(RunResult $result, SyncJob $job, array $adopted, SyncSide $sideB, int $matched = 0, int $identical = 0): void
+    {
+        // Identical ones are same-UID by construction (a card without a UID is
+        // never identical) and are not updated; reportIdentical() says so.
+        $sameUid = count($adopted) - $matched - $identical;
+        if ($sameUid > 0) {
+            $this->warn($result, $job, sprintf(
+                '%d item%s already existed in %s under the same UID and %s updated there in place rather than '
+                    . 'created a second time.',
+                $sameUid,
+                $sameUid === 1 ? '' : 's',
+                $sideB->label(),
+                $sameUid === 1 ? 'is' : 'are',
+            ));
+        }
+        if ($matched > 0) {
+            $this->warn($result, $job, sprintf(
+                '%d contact%s matched %s in %s that %s no UID of %s own -- the same name and a shared email '
+                    . 'address or phone number, and no other candidate -- and %s updated there in place rather '
+                    . 'than created a second time.',
+                $matched,
+                $matched === 1 ? '' : 's',
+                $matched === 1 ? 'a card' : 'cards',
+                $sideB->label(),
+                $matched === 1 ? 'has' : 'have',
+                $matched === 1 ? 'its' : 'their',
+                $matched === 1 ? 'is' : 'are',
+            ));
+        }
+    }
+
+    /**
+     * Why a plan must not run: its source has no contacts at all, yet it
+     * would remove contacts this job synced from that source earlier. Null
+     * when the plan is fine.
+     *
+     * An address book that suddenly reads as empty is far more often one
+     * that was deleted, unshared, switched for another, or answered with an
+     * empty listing by a misbehaving server than one somebody really
+     * emptied. Every one of those looks, to the Planner, exactly like the
+     * user deleting every contact -- and with the mirror policy that becomes
+     * a deletion of everything on the destination, which no snapshot covers
+     * on a push job (snapshots are of the Nextcloud book, which is the
+     * source there). A deleted Nextcloud book did exactly that, verified.
+     * SideFactory now catches that particular cause before fetching; this
+     * catches every cause, including ones nobody has thought of.
+     *
+     * Deliberately narrow: an empty source only. Partial deletions, however
+     * large, are left alone -- a threshold would be a guess about what a
+     * user meant, and it is the all-at-once case that is never real.
+     */
+    private static function emptySourceRefusal(Plan $plan, AddressBook $bookA, SyncSide $sideA, SyncSide $sideB): ?string
+    {
+        $removals = count($plan->contactsRemoveOnB);
+        if ($bookA->contacts !== [] || $removals === 0) {
+            return null;
+        }
+
+        return sprintf(
+            '%s has no contacts at all, but %d contact%s synced from it before would be removed from %s. '
+                . 'Refusing to do that: an address book that suddenly reads as empty has far more often been '
+                . 'deleted, unshared or misconfigured than really emptied. If you did empty it on purpose, '
+                . 'delete the contacts in %s yourself, or delete this job and create it again.',
+            $sideA->label(),
+            $removals,
+            $removals === 1 ? '' : 's',
+            $sideB->label(),
+            $sideB->label(),
+        );
+    }
+
     private function fail(RunResult $result, SyncJob $job, string $message, ?\Throwable $e = null): void
     {
         $result->errors[] = $message;
@@ -212,7 +462,23 @@ class Runner
         ?Progress $progress = null,
     ): RunResult {
         $progress ??= Progress::none();
-        [$sideA, $sideB] = $this->sides->forJob($job);
+        try {
+            [$sideA, $sideB] = $this->sides->forJob($job);
+        } catch (HubUnavailable $e) {
+            // Recorded as a failed run, not just thrown: a scheduled run's
+            // exception ends in the log, and the run history is where the
+            // user looks to find out why their sync stopped.
+            $runId = $this->state->startRun($job->id, $dryRun, $triggerSource, $progress->token());
+            $this->state->finishRun($runId, 0, 0, 0, 0, 0, [], [], 'failed', $e->getMessage());
+            $this->logger?->error('Contacts Hub: sync job "{job_name}" not run: {message}', [
+                'message' => $e->getMessage(),
+                'job' => $job->id,
+                'job_name' => $job->name,
+                'user' => $job->userId,
+                'app' => 'contacthub',
+            ]);
+            throw $e;
+        }
         $map = $job->sideMap();
 
         if ($dryRun) {
@@ -299,6 +565,28 @@ class Runner
                 $result = new RunResult(false, new Plan());
                 $result->totalItems = (int) $openRun['total_items'];
                 $result->processedItems = (int) $openRun['processed_items'];
+                // What the earlier segments did and reported. A resumed
+                // segment starts from a fresh RunResult, so without this the
+                // run's totals -- the response, finishRun()'s row, the
+                // history -- covered only the segment that happened to be
+                // last: a push that paused once reported only what its second
+                // half created, and the warnings raised while planning were
+                // gone from the stored run.
+                $result->created = (int) $openRun['created'];
+                $result->updated = (int) $openRun['updated'];
+                $result->deleted = (int) $openRun['deleted'];
+                $result->archived = (int) $openRun['archived'];
+                $result->warnings = self::decodeReport($openRun['warnings_json'] ?? null);
+                $result->errors = self::decodeReport($openRun['errors_json'] ?? null);
+                // A resumed segment does no planning, so there is no fresh
+                // Plan to count duplicates from the way the first segment
+                // had. Read the live count instead of leaving this at the
+                // RunResult default of 0 -- otherwise every consumer of this
+                // result (finishRun()'s persisted run row, the manual-run
+                // response, RunPanel) would report "0 conflicts" for a run
+                // that paused and resumed despite real unresolved conflicts
+                // sitting in the database the whole time.
+                $result->conflicts = $this->state->countUnresolvedConflicts($job->id);
                 $liveEtagsB = $sideB->listEtags();
             } else {
                 [$runId, $result, $liveBHrefsFromPlanning] = $this->materializeNewRun(
@@ -310,6 +598,10 @@ class Runner
                     $sideB,
                     $progress,
                 );
+
+                // Warnings raised while planning exist nowhere else once this
+                // request ends; a resumed segment does no planning.
+                $this->state->saveRunReport($runId, $result->warnings, $result->errors);
 
                 // Snapshot between planning and the first write. Planning
                 // only touches bookkeeping (run rows, conflict records,
@@ -395,30 +687,45 @@ class Runner
         // mistaken for a real run awaiting resumption.
         $runId = $this->state->startRun($job->id, true, $triggerSource, $progress->token());
 
-        [$bookA, $bookB, $warnings, , , $liveBHrefs] = $this->fetchBothSides($job, $sideA, $sideB, $progress);
+        [$bookA, $bookB, $warnings, , $hrefsB, $liveBHrefs] = $this->fetchBothSides($job, $sideA, $sideB, $progress);
 
         $progress->phase('planning', 'Comparing both sides');
 
         $plan = (new Planner())->plan(new PlanInput(
             $bookA,
             $bookB,
-            $map->toPlannerAll($this->state->allContacts($job->id)),
-            $map->toPlannerAll($this->state->allGroups($job->id)),
+            self::plannerStates($this->state->allContacts($job->id), $map, $sideA, $sideB),
+            self::plannerStates($this->state->allGroups($job->id), $map, $sideA, $sideB),
             $liveBHrefs,
             $force,
+            $sideB->groupStrategy() === 'categories',
         ));
 
         // Seeded through warn() rather than the constructor, so parse warnings
         // from buildAddressBook reach the log like every other warning. Passing
         // them straight in was the last path that bypassed it.
+        $adopted = self::adoptExistingOnB($plan, $hrefsB, $sideB);
+        $identical = self::identicalOnB($plan, $adopted, $bookA, $bookB, $job, $sideB);
+
         $result = new RunResult(true, $plan);
         $this->carry($result, $job, $warnings);
+        $refusal = self::emptySourceRefusal($plan, $bookA, $sideA, $sideB);
+        if ($refusal !== null) {
+            $this->warn($result, $job, "A real run would stop here. {$refusal}");
+        }
         $this->reportEndpointDrift($result, $job, $bookB, $sideB);
+        $this->reportGroupNameCollisions($result, $job, $sideB);
+        $this->reportAdoptions($result, $job, $adopted, $sideB, count($plan->contactsAdoptAToB), count($identical));
+        $this->reportIdentical($result, $job, count($identical), $sideB);
+        // On a categories side a group is never written as such -- its
+        // membership travels on the contacts -- so counting it would promise
+        // writes that do not happen.
+        $groupsWritten = $sideB->groupStrategy() !== 'categories';
         $result->conflicts = count($plan->contactDuplicates);
-        $result->created = count($plan->contactsCreateAToB) + count($plan->groupsCreateAToB);
-        $result->updated = count($plan->contactsUpdateAToB) + count($plan->groupsUpdateAToB);
-        $result->deleted = count($plan->contactsRemoveOnB) + count($plan->groupsRemoveOnB);
-        $this->state->finishRun($runId, $result->created, $result->updated, $result->deleted, 0, $result->conflicts, $warnings, []);
+        $result->created = count($plan->contactsCreateAToB) + ($groupsWritten ? count($plan->groupsCreateAToB) : 0);
+        $result->updated = count($plan->contactsUpdateAToB) + ($groupsWritten ? count($plan->groupsUpdateAToB) : 0);
+        $result->deleted = count($plan->contactsRemoveOnB) + ($groupsWritten ? count($plan->groupsRemoveOnB) : 0);
+        $this->state->finishRun($runId, $result->created, $result->updated, $result->deleted, 0, $result->conflicts, $result->warnings, []);
         return $result;
     }
 
@@ -438,14 +745,14 @@ class Runner
         $fetchedA = $sideA->fetchAll($progress);
         $etagsA = $sideA->listEtags();
         self::assertWholeBookFetched($sideA, $fetchedA, $etagsA);
-        [$bookA, $warningsA] = Model::buildAddressBook(array_column($fetchedA, 'vcard'), $sideA->label(), count($etagsA));
+        [$bookA, $warningsA] = Model::buildAddressBook(array_column($fetchedA, 'vcard'), $sideA->label(), count($etagsA), array_column($fetchedA, 'href'));
         $bookA = self::withProjectedGroups($bookA, $sideA, $job);
 
         $progress->phase('fetch_b', "Reading {$sideB->label()}");
         $fetchedB = $sideB->fetchAll($progress);
         $etagsB = $sideB->listEtags();
         self::assertWholeBookFetched($sideB, $fetchedB, $etagsB);
-        [$bookB, $warningsB] = Model::buildAddressBook(array_column($fetchedB, 'vcard'), $sideB->label(), count($etagsB));
+        [$bookB, $warningsB] = Model::buildAddressBook(array_column($fetchedB, 'vcard'), $sideB->label(), count($etagsB), array_column($fetchedB, 'href'));
         $bookB = self::withProjectedGroups($bookB, $sideB, $job);
 
         // Dropped here rather than at push time, and this placement is the
@@ -506,15 +813,57 @@ class Runner
         $plan = (new Planner())->plan(new PlanInput(
             $bookA,
             $bookB,
-            $map->toPlannerAll($this->state->allContacts($job->id)),
-            $map->toPlannerAll($this->state->allGroups($job->id)),
+            self::plannerStates($this->state->allContacts($job->id), $map, $sideA, $sideB),
+            self::plannerStates($this->state->allGroups($job->id), $map, $sideA, $sideB),
             $liveBHrefs,
             $force,
+            $sideB->groupStrategy() === 'categories',
         ));
+
+        // Before anything is recorded: a refused plan must leave no
+        // conflicts, dropped state or run items behind.
+        $refusal = self::emptySourceRefusal($plan, $bookA, $sideA, $sideB);
+        if ($refusal !== null) {
+            throw new \RuntimeException($refusal);
+        }
+
+        $adopted = self::adoptExistingOnB($plan, $hrefsB, $sideB);
+        $identical = self::identicalOnB($plan, $adopted, $bookA, $bookB, $job, $sideB);
+        // Recorded before anything is pushed, so the push finds the existing
+        // copy through state like any other tracked item. If the push then
+        // fails, the row says B has it and A's hash is unknown, which the
+        // next run reads as "changed" and retries -- it cannot get stuck.
+        foreach ($adopted as $key => $href) {
+            [$kind, $uid] = explode(':', $key, 2);
+            $kind === 'contact'
+                ? $this->state->upsertContact($job->id, $uid, $map->toStorage(['b_href' => $href]))
+                : $this->state->upsertGroup($job->id, $uid, $map->toStorage(['b_href' => $href]));
+        }
+
+        // Identical copies need no push, so there is no run item to record
+        // them afterwards: they are synced as of now, with both sides' hashes,
+        // and an edit on A moves its hash like any other.
+        foreach ($identical as $uid => $bUid) {
+            $contactA = $bookA->contacts[$uid];
+            $contactB = $bookB->contacts[$bUid];
+            $href = $adopted["contact:{$uid}"];
+            $this->state->upsertContact($job->id, $uid, $map->toStorage([
+                'b_href' => $href,
+                'b_etag' => $liveBHrefs[$href] ?? null,
+                'b_hash' => Model::contactContentHash($contactB),
+                'b_rev' => $contactB->rev,
+                'a_href' => $hrefsA[$uid] ?? null,
+                'a_hash' => Model::contactContentHash($contactA),
+                'a_rev' => $contactA->rev,
+            ]));
+        }
 
         $result = new RunResult(false, $plan);
         $this->carry($result, $job, $warnings);
         $this->reportEndpointDrift($result, $job, $bookB, $sideB);
+        $this->reportGroupNameCollisions($result, $job, $sideB);
+        $this->reportAdoptions($result, $job, $adopted, $sideB, count($plan->contactsAdoptAToB), count($identical));
+        $this->reportIdentical($result, $job, count($identical), $sideB);
         $result->conflicts = count($plan->contactDuplicates);
 
         // Conflict snapshots are stored by role, not by A/B, so the UI can
@@ -535,7 +884,32 @@ class Runner
                 'dest_uid' => $dup->destUid,
                 'dest_href' => $sourceIsA ? ($hrefsB[$dup->destUid] ?? null) : ($hrefsA[$dup->destUid] ?? null),
                 'source_href' => $sourceIsA ? ($hrefsA[$dup->uid] ?? null) : ($hrefsB[$dup->uid] ?? null),
+                // What a run would fold into CATEGORIES on a categories
+                // destination. Resolution has no address book in hand to
+                // derive it from, and without it a resolved contact arrived
+                // with no groups at all.
+                'categories' => Planner::groupNamesForContact($dup->uid, $bookA, null),
             ]));
+        }
+
+        // A full plan has just said which conflicts still stand; any other
+        // open one describes a situation that no longer exists. See
+        // StateMapper::closeConflictsNotIn() for what leaving them open did.
+        $closed = $this->state->closeConflictsNotIn(
+            $job->id,
+            array_map(static fn(DuplicateMatch $d): string => $d->uid, $plan->contactDuplicates),
+            'obsolete',
+        );
+        if ($closed > 0) {
+            $this->warn($result, $job, sprintf(
+                '%d conflict%s no longer applied -- the contacts involved were changed or deleted -- and %s closed without changing anything.',
+                $closed,
+                $closed === 1 ? '' : 's',
+                $closed === 1 ? 'was' : 'were',
+            ));
+            if ($job->conflictPaused && $this->state->countUnresolvedConflicts($job->id) === 0) {
+                $this->jobs->setConflictPaused($job->id, $job->userId, false);
+            }
         }
         foreach ($plan->contactsDropState as $uid) {
             $this->state->deleteContact($job->id, $uid);
@@ -728,16 +1102,31 @@ class Runner
         $run = $this->state->getRun($runId);
         $total = (int) ($run['total_items'] ?? 0);
         $processed = (int) ($run['processed_items'] ?? 0);
-        $contactStates = $map->toPlannerAll($this->state->allContacts($job->id));
-        $groupStates = $map->toPlannerAll($this->state->allGroups($job->id));
+        $contactStates = self::plannerStates($this->state->allContacts($job->id), $map, $sideA, $sideB);
+        $groupStates = self::plannerStates($this->state->allGroups($job->id), $map, $sideA, $sideB);
 
         $progress->phase('applying', 'Applying changes', $total);
+
+        // Warnings and errors are JSON, so they are rewritten only when an
+        // item added one; the counters ride along on the progress UPDATE
+        // that happens per item anyway.
+        $reported = count($result->warnings) + count($result->errors);
 
         foreach ($items as $item) {
             $progress->step($processed, $total, self::describeItem($item));
             $this->dispatchItem($job, $map, $item, $sideA, $sideB, $liveEtagsB, $contactStates, $groupStates, $result);
             $processed++;
-            $this->state->updateRunProgress($runId, $total, $processed);
+            $this->state->updateRunProgress($runId, $total, $processed, [
+                'created' => $result->created,
+                'updated' => $result->updated,
+                'deleted' => $result->deleted,
+                'archived' => $result->archived,
+                'errors' => count($result->errors),
+            ]);
+            if (count($result->warnings) + count($result->errors) !== $reported) {
+                $this->state->saveRunReport($runId, $result->warnings, $result->errors);
+                $reported = count($result->warnings) + count($result->errors);
+            }
 
             // Renew the lock between items -- the only place it is safe to,
             // since an item is the unit of work this run can be interrupted
@@ -777,6 +1166,14 @@ class Runner
         $result->totalItems = $total;
         $result->processedItems = $processed;
         return true;
+    }
+
+    /** @return string[] */
+    private static function decodeReport(mixed $json): array
+    {
+        $decoded = is_string($json) ? json_decode($json, true) : null;
+
+        return is_array($decoded) ? array_values(array_filter($decoded, 'is_string')) : [];
     }
 
     /**
@@ -874,7 +1271,9 @@ class Runner
         array $contactStates,
         RunResult $result,
     ): void {
-        $sourceContact = Model::parse((string) $item['source_snapshot']);
+        // $uid is the fallback: a source card with no UID is tracked under the
+        // identity derived from its href, and parses as that.
+        $sourceContact = Model::parse((string) $item['source_snapshot'], $uid);
         if (!$sourceContact instanceof Contact) {
             throw new \RuntimeException("uid {$uid} is not a contact vCard");
         }
@@ -885,11 +1284,28 @@ class Runner
             $categories = is_array($decoded) ? $decoded : [];
         }
 
-        $prepared = $this->preparePhoto($source, $uid, $sourceContact, $job, $result);
-        $text = Transform::renderForDestination($prepared, $job->includePhotos, $categories);
+        $text = DestinationRenderer::render(
+            $source,
+            $sourceContact->rawText,
+            $job->includePhotos,
+            $categories,
+            fn(string $why) => $this->warn(
+                $result,
+                $job,
+                "contact {$uid}: failed to fetch referenced photo, syncing without it: {$why}",
+            ),
+        );
+
+        // A card that arrived without a UID leaves with one -- its derived
+        // identity -- or the next run, reading the copy it wrote, would see a
+        // different contact from the one it tracks. Only the copy written to
+        // the other side changes; the source card is left as it was.
+        if ($sourceContact->uidDerived) {
+            $text = Transform::withUid($text, $uid);
+        }
 
         $stateRow = $contactStates[$uid] ?? [];
-        $existingHref = $stateRow['b_href'] ?? null;
+        $existingHref = self::ownedHref($target, $stateRow['b_href'] ?? null);
         $href = $existingHref ?? $target->hrefFor($uid);
         [$newEtag, $storedText] = $target->putVCard($href, $text, $liveTargetEtags[$href] ?? null);
 
@@ -910,6 +1326,46 @@ class Runner
     }
 
     /**
+     * State rows in the Planner's a/b vocabulary, with every stored href in
+     * the spelling its side's live listing uses.
+     *
+     * The Planner decides "is B's copy still there?" by looking the stored
+     * href up in that listing, as a string. State written by an older
+     * version, or before the server changed how it spells a URL, can name
+     * the right resource in another spelling -- and a contact that looks
+     * absent is re-created on every run, refused with a 412 each time.
+     *
+     * @param array<string, array<string, mixed>> $rows role-named, keyed by uid
+     * @return array<string, array<string, mixed>>
+     */
+    private static function plannerStates(array $rows, SideMap $map, ?SyncSide $sideA, SyncSide $sideB): array
+    {
+        $states = $map->toPlannerAll($rows);
+        foreach ($states as $uid => $state) {
+            foreach (['a_href' => $sideA, 'b_href' => $sideB] as $key => $side) {
+                if ($side !== null && is_string($state[$key] ?? null) && $state[$key] !== '') {
+                    $states[$uid][$key] = $side->normalizeHref($state[$key]);
+                }
+            }
+        }
+
+        return $states;
+    }
+
+    /**
+     * A stored href, or null when it does not name a location on $side.
+     *
+     * State written before a job or endpoint was moved elsewhere names the
+     * old location. Read as "no copy here", the item is written afresh where
+     * it belongs on this side instead of being sent -- with this side's
+     * credentials -- to wherever it used to live. See SyncSide::owns().
+     */
+    private static function ownedHref(SyncSide $side, mixed $href): ?string
+    {
+        return is_string($href) && $href !== '' && $side->owns($href) ? $href : null;
+    }
+
+    /**
      * @param list<array{href: string, vcard: string}> $fetched
      * @return array<string, string> uid => href
      */
@@ -918,34 +1374,12 @@ class Runner
         $map = [];
         foreach ($fetched as $pair) {
             try {
-                $map[Model::parse($pair['vcard'])->uid] = $pair['href'];
+                $map[Model::parse($pair['vcard'], Model::derivedUid($pair['href']))->uid] = $pair['href'];
             } catch (\Throwable) {
                 // Unparseable -- already reported as a warning by buildAddressBook.
             }
         }
         return $map;
-    }
-
-    /**
-     * Takes the RunResult rather than a by-reference warnings array, so this
-     * warning is logged like every other one. A private array reference was
-     * the one path that bypassed warn().
-     */
-    private function preparePhoto(SyncSide $owner, string $uid, Contact $contact, SyncJob $job, RunResult $result): string
-    {
-        if (!$job->includePhotos) {
-            return $contact->rawText;
-        }
-        try {
-            return Transform::resolvePhotoUri($contact->rawText, fn(string $url): string => $owner->fetchBinary($url));
-        } catch (\Throwable $e) {
-            $this->warn(
-                $result,
-                $job,
-                "contact {$uid}: failed to fetch referenced photo, syncing without it: {$e->getMessage()}",
-            );
-            return Transform::stripPhoto($contact->rawText);
-        }
     }
 
     /**
@@ -963,10 +1397,24 @@ class Runner
         array $groupStates,
         RunResult $result,
     ): void {
+        $sourceGroup = Model::parse((string) $item['source_snapshot'], $uid);
+        if (!$sourceGroup instanceof Group) {
+            throw new \RuntimeException("uid {$uid} is not a group vCard");
+        }
+        $stateRow = $groupStates[$uid] ?? [];
+
         if ($target->groupStrategy() === 'categories') {
             // Categories-strategy sides never get a discrete group
             // resource -- membership is folded into each contact's
-            // CATEGORIES instead (handled in pushContactOne).
+            // CATEGORIES instead (pushContactOne, and the Planner re-pushes
+            // members when a group changes). Nothing to write, but the group
+            // is recorded as seen: without a row it was planned as new again
+            // on every run, so every run had work and took a snapshot.
+            $this->state->upsertGroup($job->id, $uid, $map->toStorage([
+                'a_href' => $item['source_href'] ?? ($stateRow['a_href'] ?? null),
+                'a_hash' => Model::groupContentHash($sourceGroup),
+                'a_rev' => $sourceGroup->rev,
+            ]) + ['payload_json' => json_encode(['name' => $sourceGroup->name, 'member_uids' => $sourceGroup->memberUids])]);
             return;
         }
         if ($target->groupStrategy() === 'collections') {
@@ -980,15 +1428,12 @@ class Runner
             return;
         }
 
-        $sourceGroup = Model::parse((string) $item['source_snapshot']);
-        if (!$sourceGroup instanceof Group) {
-            throw new \RuntimeException("uid {$uid} is not a group vCard");
-        }
-
-        $stateRow = $groupStates[$uid] ?? [];
-        $existingHref = $stateRow['b_href'] ?? null;
+        $existingHref = self::ownedHref($target, $stateRow['b_href'] ?? null);
         $href = $existingHref ?? $target->hrefFor($uid);
-        [$newEtag] = $target->putVCard($href, $sourceGroup->rawText, $liveTargetEtags[$href] ?? null);
+        // A group that arrived without a UID leaves with its derived one, for
+        // the reason a contact does; see pushContactOne().
+        $groupText = $sourceGroup->uidDerived ? Transform::withUid($sourceGroup->rawText, $uid) : $sourceGroup->rawText;
+        [$newEtag] = $target->putVCard($href, $groupText, $liveTargetEtags[$href] ?? null);
 
         $this->state->upsertGroup($job->id, $uid, $map->toStorage([
             'b_href' => $href,
@@ -1015,12 +1460,12 @@ class Runner
         RunResult $result,
     ): void {
         $stateRow = $groupStates[$uid] ?? null;
-        $href = $stateRow['b_href'] ?? null;
+        $href = self::ownedHref($target, $stateRow['b_href'] ?? null);
         if ($href !== null) {
             $target->delete($href, $liveTargetEtags[$href] ?? null);
+            $result->deleted++;
         }
         $this->state->deleteGroup($job->id, $uid);
-        $result->deleted++;
     }
 
     /** @param array<string, array<string, mixed>> $contactStates @param array<string, string> $liveTargetEtags */
@@ -1036,7 +1481,7 @@ class Runner
         $stateRow = $contactStates[$uid] ?? [];
 
         if ($job->deletionPolicy === 'mirror') {
-            $href = $stateRow['b_href'] ?? null;
+            $href = self::ownedHref($target, $stateRow['b_href'] ?? null);
             if ($href !== null) {
                 $target->delete($href, $liveTargetEtags[$href] ?? null);
             }
@@ -1050,6 +1495,15 @@ class Runner
         // items, each of which owns one href and is written once, and wrong
         // for the archive group, which is one shared resource every archival
         // in the run rewrites -- see Archiver::addToArchiveGroup.
+        if (self::ownedHref($target, $stateRow['b_href'] ?? null) === null) {
+            // Nothing on this side to archive. Dropping the row is what ends
+            // it: kept, it was planned as a removal again on every run,
+            // since nothing ever marked it archived.
+            $this->state->deleteContact($job->id, $uid);
+
+            return;
+        }
+
         $this->archiveContact($job, $map, $uid, $stateRow, $target);
         $result->archived++;
     }
@@ -1090,9 +1544,9 @@ class Runner
         // group from scratch and clobber the earlier membership. The ETag
         // needs the same freshness for the same reason, and gets it inside
         // addToArchiveGroup rather than from anything passed down here.
-        $freshGroups = $map->toPlannerAll($this->state->allGroups($job->id));
+        $freshGroups = self::plannerStates($this->state->allGroups($job->id), $map, null, $target);
         $groupState = $freshGroups[$archiveGroupUid] ?? null;
-        $existingGroupHref = $groupState['b_href'] ?? null;
+        $existingGroupHref = self::ownedHref($target, $groupState['b_href'] ?? null);
         [$groupHref, $newGroupEtag] = Archiver::addToArchiveGroup(
             $target,
             $archiveGroupUid,
