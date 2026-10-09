@@ -49,7 +49,7 @@ talking to each other directly.
 Contacts stay where they belong: in Nextcloud's own address books, editable in
 the Contacts app and reachable from every CardDAV client you already use.
     ]]></description>
-    <version>0.2.3</version>
+    <version>0.2.4</version>
     <licence>agpl</licence>
     <author mail="gerard.kieffer@ikmail.com" homepage="https://www.gerardkieffer.net">Gérard Kieffer</author>
     <namespace>ContactHub</namespace>
