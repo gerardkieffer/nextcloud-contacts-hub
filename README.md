@@ -65,7 +65,33 @@ files, and it has no runtime dependencies beyond Nextcloud itself.
 
 ## Installing
 
-Until it is on the app store, install from source:
+Until it is on the app store, install from source.
+
+### 1. Make sure Nextcloud looks in `custom_apps`
+
+**Do this first.** Nextcloud only loads apps from the directories listed in
+`apps_paths`, and on a normal installation that is just the stock `apps/`
+folder. An app copied into `custom_apps/` is silently ignored until that
+folder is added to `config/config.php`:
+
+```php
+'apps_paths' => [
+    [ 'path' => OC::$SERVERROOT.'/apps',        'url' => '/apps',        'writable' => false ],
+    [ 'path' => OC::$SERVERROOT.'/custom_apps', 'url' => '/custom_apps', 'writable' => true  ],
+],
+```
+
+The array **replaces** the default instead of extending it, so `apps` has to
+stay in the list next to `custom_apps`. Create the folder if it does not
+exist, and make it writable by the web server user; otherwise the Apps page
+fails with "Cannot write into apps directory".
+
+To check what a server uses now: `php occ config:system:get apps_paths`. If it
+prints nothing, only `apps/` is scanned. The official Nextcloud Docker image
+already declares `custom_apps` (in `config/apps.config.php`), so nothing is
+needed there.
+
+### 2. Get the app and enable it
 
 ```bash
 cd /path/to/nextcloud/custom_apps
@@ -78,11 +104,10 @@ sudo -u www-data php ../../occ app:enable contacthub
 Then open **Contacts Hub** from the app menu.
 
 If that last command answers `Could not download app contacthub, it was not
-found on the appstore`, the app is somewhere Nextcloud does not scan —
-`custom_apps` only counts if it is listed in `apps_paths`. See
-**[docs/install.md](docs/install.md)** for the full procedure, including
-building a minimal package for a server without Git, and what to set so the
-background sync actually runs on a schedule.
+found on the appstore`, the app is somewhere Nextcloud does not scan: go back
+to step 1. See **[docs/install.md](docs/install.md)** for the full procedure,
+including building a minimal package for a server without Git, and what to
+set so the background sync actually runs on a schedule.
 
 ## Setting it up
 
