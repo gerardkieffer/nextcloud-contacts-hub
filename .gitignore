@@ -12,8 +12,9 @@
 
 # Frontend build inputs. js/ is NOT ignored: Nextcloud installs apps as plain
 # files with no build step on the server, so the built bundle ships in the repo.
-# Source maps are the exception -- 1.9 MB of regenerable text that would
-# dominate both the repository and the app-store tarball.
+# Source maps are the exception -- megabytes of regenerable text, many times
+# the size of the bundles themselves, that would dominate both the repository
+# and the app-store tarball.
 /node_modules/
 /.npm-cache/
 /js/*.map
@@ -31,7 +32,7 @@ composer.lock
 .env
 .DS_Store
 
-# Leftover from the Python baseline on main; harmless if present locally.
+# Leftover from this app's Python predecessor; harmless if present locally.
 __pycache__/
 *.pyc
 .venv/
